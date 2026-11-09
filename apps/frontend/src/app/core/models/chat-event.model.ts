@@ -1,0 +1,1 @@
+export interface IChatEvent { id: number; workspace_id: string; agent_id: string; task_id?: number; direction: 'INBOUND'|'OUTBOUND'; kind: string; content: string; collapsible_group_id?: string; created_at: string; }

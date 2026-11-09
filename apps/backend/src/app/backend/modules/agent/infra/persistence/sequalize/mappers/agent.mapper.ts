@@ -13,6 +13,8 @@ export class AgentMapper {
       current_session_id: json.current_session_id,
       task_state: json.task_state,
       workspace_id: json.workspace_id,
+      additional_instruction: json.additional_instruction ?? null,
+      color: json.color ?? null,
     };
   }
 
@@ -26,6 +28,8 @@ export class AgentMapper {
       current_session_id: agent.current_session_id,
       task_state: agent.task_state,
       workspace_id: agent.workspace_id,
+      additional_instruction: agent.additional_instruction ?? null,
+      color: agent.color ?? null,
     };
   }
 }

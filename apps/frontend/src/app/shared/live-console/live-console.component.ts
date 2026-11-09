@@ -4,7 +4,7 @@ import { ButtonModule } from 'primeng/button';
 import { BadgeModule } from 'primeng/badge';
 import { WebsocketService } from '../../core/services/websocket.service';
 import { AgentSelectionService } from '../../core/services/agent-selection.service';
-import { StreamTextEvent, StreamToolEvent } from '../../core/models/stream.model';
+import { LiveStreamCacheService, AgentLiveBuffer } from '../../core/services/live-stream-cache.service';
 import { Subscription } from 'rxjs';
 
 @Component({
@@ -65,38 +65,25 @@ export class LiveConsoleComponent implements OnInit, OnDestroy {
   @Input() selectedAgentId: string | null = null;
   textBuffer = '';
   thinkingBuffer = '';
-  tools: StreamToolEvent[] = [];
+  tools: any[] = [];
   collapsed = false;
   thinkingCollapsed = false;
   private subs: Subscription[] = [];
 
-  constructor(private ws: WebsocketService, private selection: AgentSelectionService) {}
+  constructor(private ws: WebsocketService, private selection: AgentSelectionService, private cache: LiveStreamCacheService) {}
+
+  private sync() {
+    const b: AgentLiveBuffer = this.cache.get(this.selectedAgentId);
+    this.textBuffer = b.text; this.thinkingBuffer = b.thinking; this.tools = b.tools;
+  }
 
   ngOnInit(): void {
-    this.subs.push(
-      this.selection.selectedAgent$.subscribe((a) => {
-        this.selectedAgentId = a?.id ?? null;
-        this.textBuffer = '';
-        this.thinkingBuffer = '';
-        this.tools = [];
-      })
-    );
-    this.subs.push(
-      this.ws.streamText$.subscribe((e: StreamTextEvent) => {
-        if (this.selectedAgentId && e.agentId !== this.selectedAgentId) return;
-        if (e.kind === 'thinking') this.thinkingBuffer += e.delta;
-        else this.textBuffer += e.delta;
-      })
-    );
-    this.subs.push(
-      this.ws.streamTool$.subscribe((e: StreamToolEvent) => {
-        if (this.selectedAgentId && e.agentId !== this.selectedAgentId) return;
-        this.tools = [...this.tools, e];
-      })
-    );
+    this.subs.push(this.selection.selectedAgent$.subscribe((a) => { this.selectedAgentId = a?.id ?? null; this.sync(); }));
+    this.subs.push(this.ws.runEvent$.subscribe((e: any) => { if (e?.type === 'started' && e.agentId) this.cache.resetRun(e.agentId, e.runId); if (e?.agentId === this.selectedAgentId) this.sync(); }));
+    this.subs.push(this.ws.streamText$.subscribe((e) => { this.cache.applyText(e); if (e.agentId === this.selectedAgentId) this.sync(); }));
+    this.subs.push(this.ws.streamTool$.subscribe((e) => { this.cache.applyTool(e as any); if (e.agentId === this.selectedAgentId) this.sync(); }));
+    this.subs.push(this.ws.transcriptCleared$.subscribe((e:any)=>{ if(e?.agentId===this.selectedAgentId){ this.cache.clear(this.selectedAgentId); this.sync(); } }));
   }
 
-  ngOnDestroy(): void {
-    this.subs.forEach((s) => s.unsubscribe());
-  }
+  ngOnDestroy(): void { this.subs.forEach((s) => s.unsubscribe()); }
 }

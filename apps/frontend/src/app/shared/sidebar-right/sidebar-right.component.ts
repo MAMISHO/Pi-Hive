@@ -1,8 +1,10 @@
 import { Component, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TagModule } from 'primeng/tag';
+import { ButtonModule } from 'primeng/button';
 import { TaskService } from '../../core/services/task.service';
 import { WebsocketService } from '../../core/services/websocket.service';
+import { WorkspaceService } from '../../core/services/workspace.service';
 import { ITaskQueue } from '../../core/models/task.model';
 import { Subscription } from 'rxjs';
 
@@ -13,12 +15,12 @@ interface TaskNode extends ITaskQueue {
 @Component({
   selector: 'app-sidebar-right',
   standalone: true,
-  imports: [CommonModule, TagModule],
+  imports: [CommonModule, TagModule, ButtonModule],
   template: `
     <div class="sidebar-right">
       <div class="header">
         <h2>Task Lineage</h2>
-        <span class="count">{{ tasks.length }}</span>
+        <div class="head-actions"><span class="count">{{ tasks.length }}</span><button pButton icon="pi pi-trash" severity="danger" [text]="true" class="p-button-sm" title="Limpiar Task Lineage" (click)="clearLineage()"></button></div>
       </div>
       <div class="timeline">
         @for (task of ordered; track task.id) {
@@ -41,6 +43,7 @@ interface TaskNode extends ITaskQueue {
   `,
   styles: [`
     .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .head-actions{display:flex;align-items:center;gap:4px}
     .header h2 { font-size: 14px; font-weight: 600; color: var(--text-primary); }
     .count { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
     .task-timeline-item { position: relative; padding-bottom: 14px; border-left: 2px solid var(--border-color); margin-left: 4px; }
@@ -61,15 +64,22 @@ export class SidebarRightComponent implements OnInit, OnDestroy {
   ordered: TaskNode[] = [];
   private subs: Subscription[] = [];
 
-  constructor(private taskService: TaskService, private ws: WebsocketService) {}
+  constructor(private taskService: TaskService, private ws: WebsocketService, private workspace: WorkspaceService) {}
 
   ngOnInit(): void {
     this.load();
     this.subs.push(this.ws.statusChange$.subscribe(() => this.load()));
+    this.subs.push(this.ws.taskUpdated$.subscribe(() => this.load()));
+    this.subs.push(this.ws.tasksCleared$.subscribe(() => this.load()));
+    this.subs.push(this.workspace.active$.subscribe(()=>this.load()));
+    this.subs.push((this.ws as any).transcriptCleared$?.subscribe(()=>this.load()) || {unsubscribe(){}} as any);
+    this.subs.push((this.ws as any).tasksCleared$?.subscribe(()=>this.load()) || {unsubscribe(){}} as any);
   }
 
   load(): void {
-    this.taskService.getAll().subscribe({
+    const ws = this.workspace.active;
+    const obs = ws ? (this.taskService as any).getByWorkspace(ws.id) : this.taskService.getAll();
+    obs.subscribe({
       next: (list) => {
         this.tasks = list;
         this.ordered = this.buildLineage(list);
@@ -112,6 +122,13 @@ export class SidebarRightComponent implements OnInit, OnDestroy {
       case 'PENDING': return 'secondary';
       default: return 'contrast';
     }
+  }
+
+  clearLineage(): void {
+    const ws = this.workspace.active; if(!ws) return;
+    if(!confirm('¿Limpiar todo el Task Lineage de este workspace? (se eliminan las tareas registradas)')) return;
+    ((this.taskService as any).clearByWorkspace ? (this.taskService as any).clearByWorkspace(ws.id) : fetch(`http://localhost:8090/tasks/workspace/${ws.id}/clear`,{method:'DELETE'})).subscribe?.(()=>this.load());
+    if(!(this.taskService as any).clearByWorkspace) fetch(`http://localhost:8090/tasks/workspace/${ws.id}/clear`,{method:'DELETE'}).then(()=>this.load());
   }
 
   ngOnDestroy(): void {

@@ -3,4 +3,5 @@ export enum TaskStatus {
   PROCESSING = 'PROCESSING',
   COMPLETED = 'COMPLETED',
   HOLD = 'HOLD',
+  STOPPED = 'STOPPED',
 }

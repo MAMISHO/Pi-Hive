@@ -1,12 +1,13 @@
-export type TaskStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'HOLD';
+export type TaskStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'HOLD' | 'STOPPED';
 
 export interface ITaskQueue {
-  id: number;
+  id?: number;
   sender_agent_id: string;
   receiver_agent_id: string;
   payload: string;
   status: TaskStatus;
-  parent_task_id: number | null;
+  parent_task_id?: number | null;
   response?: string | null;
-  created_at: string;
+  workspace_id?: string;
+  created_at?: string | Date;
 }

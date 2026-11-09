@@ -8,5 +8,6 @@ export interface ITaskQueue {
   status: TaskStatus;
   parent_task_id: number | null;
   response: string | null;
+  workspace_id: string | null;
   created_at: Date;
 }

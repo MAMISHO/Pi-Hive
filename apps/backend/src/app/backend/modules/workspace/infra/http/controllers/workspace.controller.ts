@@ -1,58 +1,79 @@
-import { Body, Controller, Get, Param, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Inject, Param, Post, Put, Query } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
-import { Inject } from '@nestjs/common';
 import { IWorkspace } from '../../../domain/models/workspace.interface.js';
 import { IWorkspaceRepository, IWorkspaceRepositoryToken } from '../../../domain/repositories/workspace-repository.interface.js';
+import { DEFAULT_SYSTEM_PROMPT_ID } from '../../../../../core/infra/prompts/default-prompts.js';
+import { agentEventEmitter } from '../../../../agent-runner/agent-runner.service.js';
+import { AgentEntity } from '../../../../agent/infra/persistence/sequalize/entities/agent.schema.js';
+import { TaskQueueEntity } from '../../../../task-queue/infra/persistence/sequalize/entities/task-queue.schema.js';
+import { AgentSessionHistoryEntity } from '../../../../session-history/infra/persistence/sequalize/entities/agent-session-history.schema.js';
 
 @Controller('workspaces')
 export class WorkspaceController {
-  constructor(@Inject(IWorkspaceRepositoryToken) private repo: IWorkspaceRepository) {}
+  constructor(@Inject(IWorkspaceRepositoryToken) private workspaceRepository: IWorkspaceRepository) {}
 
-  @Get()
-  getAll() { return this.repo.getAll(); }
-
-  @Get('active')
-  getActive() { return this.repo.getActive(); }
-
-  @Get(':id')
-  getOne(@Param('id') id: string) { return this.repo.get(id); }
-
-  @Post()
-  async create(@Body() body: { name: string; path: string }) {
-    const ws: IWorkspace = {
-      id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `ws-${Date.now()}`,
-      name: body.name || body.path.split('/').pop() || 'Workspace',
-      path: body.path,
-      is_active: true,
-      created_at: new Date(),
-    };
-    await this.repo.setActive(ws.id).catch(() => {}); // ensure others inactive if any
-    // but ws not created yet; create then set active
-    const created = await this.repo.add(ws);
-    await this.repo.setActive(created.id);
-    return created;
+  private async deactivateAll() {
+    const all = await this.workspaceRepository.getAll();
+    for (const w of all) if ((w as any).is_active) { (w as any).is_active = false; await this.workspaceRepository.update(w as any); }
   }
 
+  @Get() async getAll(): Promise<IWorkspace[]> { return await this.workspaceRepository.getAll(); }
+  @Get('active') async getActive(): Promise<IWorkspace | null> { return await this.workspaceRepository.getActive(); }
+
+  @Get('browse/dirs')
+  browseDirs(@Query('path') dirPath?: string): any {
+    const base = dirPath && dirPath.trim() ? path.resolve(dirPath) : process.env.HOME || '/';
+    try {
+      const entries = fs.readdirSync(base, { withFileTypes: true });
+      const dirs = entries.filter(e => e.isDirectory() && !e.name.startsWith('.')).map(e => ({ name: e.name, path: path.join(base, e.name) })).sort((a,b)=>a.name.localeCompare(b.name));
+      const parent = path.dirname(base);
+      return { current: base, parent: parent !== base ? parent : null, dirs };
+    } catch (e: any) { return { current: base, parent: null, dirs: [], error: e?.message || 'Cannot read directory' }; }
+  }
+
+  @Post()
+  async create(@Body() body: { name: string; path: string; hitl_enabled?: boolean }): Promise<IWorkspace> {
+    await this.deactivateAll();
+    return await this.workspaceRepository.add({ name: body.name, path: body.path, is_active: true, hitl_enabled: body.hitl_enabled ?? false, active_system_prompt_id: DEFAULT_SYSTEM_PROMPT_ID } as any);
+  }
+
+  @Get(':id') async getById(@Param('id') id: string): Promise<IWorkspace> { return await this.workspaceRepository.get(id) as IWorkspace; }
+
   @Put(':id/activate')
-  async activate(@Param('id') id: string) {
-    await this.repo.setActive(id);
+  async activate(@Param('id') id: string): Promise<{ ok: boolean }> {
+    await this.deactivateAll();
+    const ws = await this.workspaceRepository.get(id);
+    if (!ws) return { ok: false };
+    (ws as any).is_active = true; await this.workspaceRepository.update(ws as any);
     return { ok: true };
   }
 
-  @Get('browse/dirs')
-  browseDirs(@Query('path') dirPath?: string) {
-    const target = dirPath && fs.existsSync(dirPath) ? dirPath : process.env.HOME || '/';
-    try {
-      const entries = fs.readdirSync(target, { withFileTypes: true });
-      const dirs = entries
-        .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
-        .map((e) => ({ name: e.name, path: path.join(target, e.name) }))
-        .sort((a, b) => a.name.localeCompare(b.name));
-      const parent = path.dirname(target);
-      return { current: target, parent: parent !== target ? parent : null, dirs };
-    } catch (e: any) {
-      return { current: target, parent: null, dirs: [], error: e?.message };
+  @Put(':id')
+  async update(@Param('id') id: string, @Body() body: Partial<IWorkspace>): Promise<IWorkspace> {
+    const ws = await this.workspaceRepository.get(id);
+    if (!ws) throw new Error('Workspace not found');
+    Object.assign(ws as any, body, { id });
+    await this.workspaceRepository.update(ws as any);
+    return await this.workspaceRepository.get(id) as IWorkspace;
+  }
+
+  @Post(':id/session/reset')
+  async resetSession(@Param('id') id: string): Promise<{ ok: boolean; agents: number }> {
+    const agents = await AgentEntity.findAll({ where: { workspace_id: id } as any });
+    for (const a of agents) {
+      agentEventEmitter.emit('agent:session:compact', a.get('id'));
+      agentEventEmitter.emit('agent:session:clear', a.get('id'));
+      await AgentSessionHistoryEntity.create({ workspace_id: id, agent_id: a.get('id'), session_id: a.get('current_session_id'), event_type: 'WORKSPACE_RESET', summary: 'Workspace session reset', details: null, created_at: new Date() } as any).catch(()=>{});
     }
+    return { ok: true, agents: agents.length };
+  }
+
+  @Delete(':id')
+  async remove(@Param('id') id: string): Promise<{ ok: boolean }> {
+    await TaskQueueEntity.destroy({ where: { workspace_id: id } as any }).catch(()=>{});
+    await AgentEntity.destroy({ where: { workspace_id: id } as any }).catch(()=>{});
+    await this.workspaceRepository.delete(id);
+    return { ok: true };
   }
 }

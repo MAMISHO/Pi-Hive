@@ -16,6 +16,17 @@ import { ITaskQueue } from '../../../../domain/models/task-queue.interface.js';
 import { TaskStatus } from '../../../../domain/models/task-status.enum.js';
 
 export const taskEventEmitter = new EventEmitter();
+const _lastPendingEmit = new Map<string, number>();
+
+function dedupPending(id: any, status: any): boolean {
+  if (status !== TaskStatus.PENDING && status !== 'PENDING') return true;
+  const key = `${id}`;
+  const now = Date.now();
+  const prev = _lastPendingEmit.get(key) || 0;
+  if (now - prev < 1500) return false; // dedup duplicate hook/controller emissions
+  _lastPendingEmit.set(key, now);
+  return true;
+}
 
 @Table({
   tableName: 'tasks_queue',
@@ -38,7 +49,7 @@ export class TaskQueueEntity extends Model<ITaskQueue> {
   @Column(DataType.TEXT)
   payload: string;
 
-  @Column(DataType.ENUM('PENDING', 'PROCESSING', 'COMPLETED', 'HOLD'))
+  @Column(DataType.STRING)
   status: TaskStatus;
 
   @ForeignKey(() => TaskQueueEntity)
@@ -51,20 +62,30 @@ export class TaskQueueEntity extends Model<ITaskQueue> {
   @Column(DataType.TEXT)
   response: string | null;
 
+  @Column({ type: DataType.STRING, allowNull: true })
+  workspace_id: string | null;
+
   @Column(DataType.DATE)
   declare created_at: Date;
 
   @AfterCreate
   static async afterCreateHook(instance: TaskQueueEntity) {
-    if (instance.status === TaskStatus.PENDING) {
-      taskEventEmitter.emit('task:pending', instance.toJSON());
+    const json = instance.toJSON() as any;
+    if (json.status === TaskStatus.PENDING && dedupPending(json.id, json.status)) {
+      taskEventEmitter.emit('task:pending', json);
     }
+    taskEventEmitter.emit('task:updated', json);
+    taskEventEmitter.emit('task:changed', { taskId: json.id, workspaceId: json.workspace_id, agentId: json.receiver_agent_id, previousStatus: null, status: json.status, task: json, reason: 'created', emittedAt: Date.now() });
   }
 
   @AfterUpdate
   static async afterUpdateHook(instance: TaskQueueEntity) {
-    if (instance.status === TaskStatus.PENDING) {
-      taskEventEmitter.emit('task:pending', instance.toJSON());
+    const json = instance.toJSON() as any;
+    const prev = (instance.previous('status') as any) ?? null;
+    if (json.status === TaskStatus.PENDING && prev !== 'PENDING' && prev !== TaskStatus.PENDING && dedupPending(json.id, json.status)) {
+      taskEventEmitter.emit('task:pending', json);
     }
+    taskEventEmitter.emit('task:updated', json);
+    taskEventEmitter.emit('task:changed', { taskId: json.id, workspaceId: json.workspace_id, agentId: json.receiver_agent_id, previousStatus: prev, status: json.status, task: json, reason: 'status', emittedAt: Date.now() });
   }
 }

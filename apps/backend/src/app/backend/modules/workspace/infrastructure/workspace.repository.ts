@@ -30,4 +30,8 @@ export class WorkspaceRepository implements IWorkspaceRepository {
     await this.dao.setAllInactive();
     await this.dao.setActive(id);
   }
+  async delete(id: string): Promise<void> {
+    await this.dao.delete(id);
+  }
 }
+

@@ -9,14 +9,25 @@ export class AgentGateway implements OnGatewayInit {
   server: Server;
 
   afterInit() {
-    agentEventEmitter.on('agent:stream:text', (data: { agentId: string; delta: string }) => {
-      this.server?.emit('agent:stream:text', data);
-    });
-    agentEventEmitter.on('agent:stream:tool', (data: { agentId: string; toolName: string; args: any }) => {
-      this.server?.emit('agent:stream:tool', data);
-    });
-    agentEventEmitter.on('agent:status-change', (data: { agentId: string; status: string }) => {
-      this.server?.emit('agent:status-change', data);
-    });
+    const fwd = (ev: string) => agentEventEmitter.on(ev, (data: any) => this.server?.emit(ev, data));
+    fwd('agent:stream:text');
+    fwd('agent:stream:tool');
+    fwd('agent:stream:tool:start');
+    fwd('agent:stream:tool:end');
+    fwd('agent:status-change');
+    fwd('agent:queue:updated');
+    fwd('agent:run:started');
+    fwd('agent:run:model');
+    fwd('agent:run:finished');
+    fwd('agent:run:error');
+    fwd('agent:run:warning');
+    fwd('agent:transcript:cleared');
+    fwd('tasks:cleared');
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { taskEventEmitter } = require('../task-queue/infra/persistence/sequalize/entities/task-queue.schema.js');
+      taskEventEmitter.on('task:updated', (data: any) => this.server?.emit('task:updated', data));
+      taskEventEmitter.on('task:changed', (data: any) => this.server?.emit('task:changed', data));
+    } catch {}
   }
 }

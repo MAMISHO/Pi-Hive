@@ -16,7 +16,7 @@ export class AgentEntity extends Model<IAgent> {
   @Column(DataType.STRING)
   name: string;
 
-  @Column({ type: DataType.STRING, unique: true, allowNull: false })
+  @Column({ type: DataType.STRING, allowNull: false })
   nickname: string;
 
   @Column(DataType.ENUM('CHIEF', 'WORKER'))
@@ -33,4 +33,13 @@ export class AgentEntity extends Model<IAgent> {
 
   @Column({ type: DataType.STRING, allowNull: true })
   workspace_id: string | null;
+
+  @Column({ type: DataType.TEXT, allowNull: true })
+  additional_instruction: string | null;
+
+  @Column({ type: DataType.STRING, allowNull: true })
+  color: string | null;
+
+  @Column({ type: DataType.DATE, allowNull: true })
+  archived_at: Date | null;
 }

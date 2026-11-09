@@ -9,9 +9,9 @@ const BASE_URL = 'http://localhost:8090';
 export class TaskService {
   constructor(private http: HttpClient) {}
 
-  getAll(): Observable<ITaskQueue[]> {
-    return this.http.get<ITaskQueue[]>(`${BASE_URL}/tasks`);
-  }
+  getAll(): Observable<ITaskQueue[]> { return this.http.get<ITaskQueue[]>(`${BASE_URL}/tasks`); }
+  getByWorkspace(workspaceId: string): Observable<ITaskQueue[]> { return this.http.get<ITaskQueue[]>(`${BASE_URL}/tasks?workspaceId=${encodeURIComponent(workspaceId)}`); }
+  clearByWorkspace(workspaceId: string): Observable<any> { return this.http.delete(`${BASE_URL}/tasks/workspace/${workspaceId}/clear`); }
 
   getByReceiver(agentId: string): Observable<ITaskQueue[]> {
     return this.http.get<ITaskQueue[]>(`${BASE_URL}/tasks/receiver/${agentId}`);

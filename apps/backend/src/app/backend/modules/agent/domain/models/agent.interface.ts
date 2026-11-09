@@ -10,4 +10,6 @@ export interface IAgent {
   current_session_id: string | null;
   task_state: Record<string, unknown> | null;
   workspace_id: string | null;
+  additional_instruction: string | null;
+  color: string | null;
 }
