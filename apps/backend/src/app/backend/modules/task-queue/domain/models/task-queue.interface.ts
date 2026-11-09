@@ -7,5 +7,6 @@ export interface ITaskQueue {
   payload: string;
   status: TaskStatus;
   parent_task_id: number | null;
+  response: string | null;
   created_at: Date;
 }

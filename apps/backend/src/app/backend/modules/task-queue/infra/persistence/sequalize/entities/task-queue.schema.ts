@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import {
   AfterCreate,
+  AfterUpdate,
   AutoIncrement,
   BelongsTo,
   Column,
@@ -47,11 +48,21 @@ export class TaskQueueEntity extends Model<ITaskQueue> {
   @BelongsTo(() => TaskQueueEntity, 'parent_task_id')
   parentTask: TaskQueueEntity;
 
+  @Column(DataType.TEXT)
+  response: string | null;
+
   @Column(DataType.DATE)
   declare created_at: Date;
 
   @AfterCreate
   static async afterCreateHook(instance: TaskQueueEntity) {
+    if (instance.status === TaskStatus.PENDING) {
+      taskEventEmitter.emit('task:pending', instance.toJSON());
+    }
+  }
+
+  @AfterUpdate
+  static async afterUpdateHook(instance: TaskQueueEntity) {
     if (instance.status === TaskStatus.PENDING) {
       taskEventEmitter.emit('task:pending', instance.toJSON());
     }

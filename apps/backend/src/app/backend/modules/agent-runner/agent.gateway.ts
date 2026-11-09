@@ -15,5 +15,8 @@ export class AgentGateway implements OnGatewayInit {
     agentEventEmitter.on('agent:stream:tool', (data: { agentId: string; toolName: string; args: any }) => {
       this.server?.emit('agent:stream:tool', data);
     });
+    agentEventEmitter.on('agent:status-change', (data: { agentId: string; status: string }) => {
+      this.server?.emit('agent:status-change', data);
+    });
   }
 }

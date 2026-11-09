@@ -9,7 +9,9 @@
         "outputPath": "dist/apps/frontend",
         "index": "apps/frontend/src/index.html",
         "main": "apps/frontend/src/main.ts",
-        "tsConfig": "apps/frontend/tsconfig.app.json"
+        "tsConfig": "apps/frontend/tsconfig.app.json",
+        "styles": ["apps/frontend/src/styles.css"],
+        "assets": []
       }
     },
     "serve": {

@@ -4,8 +4,12 @@ export abstract class GenericSequalizeDAO<T extends Model> {
   constructor(protected model: ModelCtor<T>) {}
 
   async create(newEntity: any): Promise<any> {
-    const entity = this.model.build(newEntity as any);
-    const saved = await entity.save();
+    const data = { ...newEntity };
+    // Let DB auto-generate id if it's 0, null, or undefined
+    if (data.id === 0 || data.id === null || data.id === undefined) {
+      delete data.id;
+    }
+    const saved = await this.model.create(data as any);
     return saved;
   }
 
