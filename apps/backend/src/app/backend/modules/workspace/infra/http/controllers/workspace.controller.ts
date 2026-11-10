@@ -86,6 +86,9 @@ export class WorkspaceController {
     const agents = await AgentEntity.findAll({ where: { workspace_id: id } as any });
     const busy = (agents as any[]).filter(a => String(a.get('status') || '') === 'WORKING').map(a => a.get('nickname') || a.get('id'));
     if (busy.length) return { ok: false, busy, cleared: 0 };
+    // Clear task lineage/queue for the whole workspace and notify UI immediately
+    await TaskQueueEntity.destroy({ where: { workspace_id: id } as any }).catch(() => {});
+    try { agentEventEmitter.emit('tasks:cleared', { workspaceId: id }); } catch {}
     const sorted = [...agents].sort((a: any, b: any) => (a.get('role') === 'CHIEF' ? 0 : 1) - (b.get('role') === 'CHIEF' ? 0 : 1) || String(a.get('nickname')||a.get('id')).localeCompare(String(b.get('nickname')||b.get('id'))));
     for (const a of sorted) {
       agentEventEmitter.emit('agent:session:clear', a.get('id'));

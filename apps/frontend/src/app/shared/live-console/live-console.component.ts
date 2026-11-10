@@ -1,4 +1,4 @@
-import { Component, OnInit, OnDestroy, Input } from '@angular/core';
+import { Component, OnInit, OnDestroy, Input, Output, EventEmitter } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ButtonModule } from 'primeng/button';
 import { BadgeModule } from 'primeng/badge';
@@ -12,15 +12,16 @@ import { Subscription } from 'rxjs';
   standalone: true,
   imports: [CommonModule, ButtonModule, BadgeModule],
   template: `
-    <div class="live-console">
+    <div class="live-console" [class.has-activity]="hasActivity()" [class.collapsed]="collapsed">
       <div class="console-header">
         <div class="title">
           <span class="dot" [class.active]="textBuffer || thinkingBuffer"></span>
           <span>Live Console</span>
+          @if (!collapsed && hasActivity()) { <span class="pulse-badge"></span> }
         </div>
         <div class="actions">
           <button pButton type="button" [label]="thinkingCollapsed ? 'Show thinking' : 'Hide thinking'" (click)="thinkingCollapsed = !thinkingCollapsed" class="p-button-text p-button-sm"></button>
-          <button pButton type="button" [label]="collapsed ? 'Expand' : 'Collapse'" (click)="collapsed = !collapsed" class="p-button-text p-button-sm"></button>
+          <button pButton type="button" [label]="collapsed ? 'Expand' : 'Collapse'" (click)="toggleCollapsed(!collapsed)" class="p-button-text p-button-sm"></button>
         </div>
       </div>
       @if (!collapsed) {
@@ -45,11 +46,17 @@ import { Subscription } from 'rxjs';
     </div>
   `,
   styles: [`
-    .live-console { display: flex; flex-direction: column; gap: 8px; }
+    .live-console { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+    .live-console.has-activity:not(.collapsed) .console-block { border-color: var(--accent-blue); box-shadow: 0 0 8px rgba(59,130,246,0.25); }
+    .live-console.collapsed { opacity: 0.6; }
+    .live-console.collapsed:hover { opacity: 0.85; }
     .console-header { display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
     .title { display: flex; align-items: center; gap: 8px; font-size: 14px; }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
     .dot.active { background: var(--accent-blue); box-shadow: 0 0 6px var(--accent-blue); }
+    .pulse-badge { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-blue); animation: pulse 1.5s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(1.4); } }
+    @media (prefers-reduced-motion: reduce) { .pulse-badge { animation: none; } }
     .actions { display: flex; gap: 4px; }
     .console-block { background: var(--bg-console); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 12px; max-height: 320px; overflow-y: auto; }
     .thinking-label, .output-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
@@ -63,14 +70,19 @@ import { Subscription } from 'rxjs';
 })
 export class LiveConsoleComponent implements OnInit, OnDestroy {
   @Input() selectedAgentId: string | null = null;
+  @Input() collapsed: boolean = false;
+  @Output() collapsedChange = new EventEmitter<boolean>();
+
   textBuffer = '';
   thinkingBuffer = '';
   tools: any[] = [];
-  collapsed = false;
   thinkingCollapsed = false;
   private subs: Subscription[] = [];
 
   constructor(private ws: WebsocketService, private selection: AgentSelectionService, private cache: LiveStreamCacheService) {}
+
+  hasActivity(): boolean { return !!this.textBuffer || !!this.thinkingBuffer || this.tools.length > 0; }
+  toggleCollapsed(v: boolean): void { this.collapsed = v; this.collapsedChange.emit(v); }
 
   private sync() {
     const b: AgentLiveBuffer = this.cache.get(this.selectedAgentId);

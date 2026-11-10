@@ -30,8 +30,6 @@ import { Subscription } from 'rxjs';
 
         </div>
       }
-      <app-live-console [selectedAgentId]="selectedAgentId"></app-live-console>
-
       <section class="panel">
         <div class="panel-header">
           <h3>Chat History</h3>
@@ -46,25 +44,25 @@ import { Subscription } from 'rxjs';
                   @else if (ev.kind === 'request') { <b>→ Request</b> }
                   @else if (ev.kind === 'response') { <b>← Response</b> }
                   @else if (ev.kind === 'thinking') { <b>🧠 Thinking</b> }
-                  @else if (ev.kind === 'tool_call') { <b>🔧 Tool</b> }
+                  @else if (ev.kind === 'tool_group') { <b>🔧 Tools</b> }
                   @else { <b>{{ ev.kind }}</b> }
                 </span>
                 <span class="ts" *ngIf="ev.created_at">{{ ev.created_at | date:'HH:mm:ss' }}</span>
               </div>
               @if (ev.kind === 'system_prompt') {
-                <details class="sys-details"><summary>Prompt del sistema (inyectado en el punto de uso) — colapsado</summary><pre>{{ ev.content }}</pre></details>
+                <details class="sys-details"><summary title="Ver prompt del sistema completo">Prompt del sistema (inyectado en el punto de uso) — colapsado</summary><pre>{{ ev.content }}</pre></details>
               } @else if (ev.kind === 'thinking') {
-                <details class="collapsible-item">
-                  <summary>🧠 {{ thinkingSummary(ev.content) }}</summary>
+                <details class="collapsible-item" title="Ver pensamiento completo">
+                  <summary title="Ver pensamiento completo">{{ thinkingSummary(ev.content) }}</summary>
                   <pre class="ev-body">{{ thinkingText(ev.content) }}</pre>
                 </details>
-              } @else if (ev.kind === 'tool_call') {
-                <details class="collapsible-item">
-                  <summary>🔧 {{ toolSummary(ev.content) }}</summary>
-                  <pre class="ev-body">{{ toolText(ev.content) }}</pre>
+              } @else if (ev.kind === 'tool_group') {
+                <details class="collapsible-item" [title]="'Ver detalles de las ' + toolGroupCount(ev.content) + ' herramienta(s) ejecutadas'">
+                  <summary title="Ver detalles de las herramientas">{{ toolGroupSummary(ev.content) }}</summary>
+                  <pre class="ev-body">{{ toolGroupText(ev.content) }}</pre>
                 </details>
               } @else {
-                <pre class="ev-body">{{ ev.content }}</pre>
+                <pre class="ev-body" [title]="ev.content">{{ ev.content }}</pre>
               }
             </div>
           } @empty {
@@ -72,6 +70,8 @@ import { Subscription } from 'rxjs';
           }
         </div>
       </section>
+
+      <app-live-console [selectedAgentId]="selectedAgentId" [collapsed]="liveConsoleCollapsed" (collapsedChange)="liveConsoleCollapsed = $event"></app-live-console>
 
       <section class="panel prompt-buffer">
         <div class="panel-header">
@@ -88,8 +88,8 @@ import { Subscription } from 'rxjs';
             <div class="queue-meta" *ngIf="queueCurrentTaskId">En proceso: tarea #{{ queueCurrentTaskId }}</div>
             @for (it of queueItems; track (it.taskId ?? $index)) {
               <div class="queue-item">
-                <div class="qi-top"><b>#{{it.taskId ?? '—'}}</b> <span class="qi-flow">{{it.taskFlow || 'direct'}}{{it.callbackFinal ? ' (final)' : ''}}</span> <span class="qi-who">de {{ requestorLabel(it.senderId) }}</span></div>
-                <div class="qi-payload">{{ it.payloadPreview || it.payload || '' }}</div>
+                <div class="qi-top"><b>#{{it.taskId ?? '—'}}</b> <span class="qi-flow">{{it.task_flow || 'direct'}}{{it.callback_final ? ' (final)' : ''}}</span> <span class="qi-who">de {{ requestorLabel(it.sender_agent_id) }}</span></div>
+                <div class="qi-payload">{{ it.preview || it.payload || '' }}</div>
               </div>
             } @empty { <div class="queue-empty">{{ queueDepth>0 ? (queueDepth + ' en cola (detalle no disponible)') : 'Sin peticiones en cola' }}</div> }
           </div>
@@ -103,8 +103,8 @@ import { Subscription } from 'rxjs';
         </div>
         <pre class="sysmsg" *ngIf="systemMsg">{{systemMsg}}</pre>
         <div class="actions">
-          @if (selectedAgent?.status === 'WORKING' || hasActiveWork()) {
-            <button pButton label="Parar" icon="pi pi-stop" severity="danger" class="p-button-outlined" (click)="stopAgent()"></button>
+          @if ((selectedAgent?.status === 'WORKING' || hasActiveWork()) && selectedAgentId) {
+            <button pButton type="button" icon="pi pi-stop" severity="danger" class="p-button-outlined btn-stop" title="Detener agente" (click)="stopAgent()"></button>
           }
           @if (holdTask) {
             <button pButton label="Liberar y Ejecutar" icon="pi pi-play" (click)="liberar()"></button>
@@ -132,7 +132,7 @@ import { Subscription } from 'rxjs';
     .chat-item:last-child { border-bottom: none; }
     .chat-meta { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
     .route { font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); }
-    .actions { margin-top: 8px; }
+    .actions { margin-top: 8px; gap:8px; display:flex; align-items:center; }
     .empty { color: var(--text-muted); font-size: 12px; }
     .system-ev { background: rgba(99,102,241,0.08); border:1px solid rgba(99,102,241,0.25); border-radius:6px; padding:8px; }
     .sys-details summary { cursor:pointer; font-size:12px; color: var(--accent-blue, #818cf8); margin-bottom:6px; }
@@ -151,7 +151,13 @@ import { Subscription } from 'rxjs';
     .q-left{display:flex; align-items:center; gap:6px;} .q-count{font-family:var(--font-mono); font-size:11px; padding:2px 8px; border-radius:999px; background:rgba(148,163,184,.15); color:var(--text-muted);}
     .q-count.has{background:rgba(245,158,11,.18); color:var(--accent-amber,#f59e0b);} .queue-list{padding:8px 10px; border-top:1px solid var(--border-color); display:flex; flex-direction:column; gap:6px; max-height:180px; overflow:auto;}
     .queue-item{padding:6px 8px; border:1px solid var(--border-color); border-radius:6px; background:var(--bg-secondary);} .qi-top{display:flex; gap:8px; align-items:center; font-size:11px; color:var(--text-secondary);} .qi-flow{font-size:10px; color:var(--accent-blue);} .qi-who{margin-left:auto; font-size:10px; color:var(--text-muted);} .qi-payload{font-size:12px; color:var(--text-primary); margin-top:2px; white-space:pre-wrap;}
-    .queue-empty,.queue-meta{font-size:11px; color:var(--text-muted);} .actions{display:flex; gap:8px; align-items:center;}
+    .queue-empty,.queue-meta{font-size:11px; color:var(--text-muted);}
+
+    /* Stop button with pulsing animation */
+    .btn-stop { width:40px; height:40px; padding:0; display:flex; align-items:center; justify-content:center; position:relative; }
+    .btn-stop::before { content:''; position:absolute; inset:-3px; border-radius:50%; border:2px solid var(--accent-red,#ef4444); animation: stopPulse 1.5s ease-in-out infinite; opacity:0.7; }
+    @keyframes stopPulse { 0%, 100% { transform: scale(1); opacity: 0.7; } 50% { transform: scale(1.25); opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { .btn-stop::before { animation: none; } }
   `],
 })
 export class SwarmMonitorComponent implements OnInit, OnDestroy {
@@ -178,6 +184,8 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy {
   queueOpen = false;
   allAgents: any[] = [];
   runStateMsg = '';
+  liveConsoleCollapsed = true;
+  stopActive = false;
   private subs: Subscription[] = [];
   private pendingLoad: any = null;
 
@@ -369,6 +377,16 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy {
   thinkingText(c: any): string { const o = this.tryParse(c); return o?.text || String(c||''); }
   toolSummary(c: any): string { const o = this.tryParse(c); if (o?.toolName) return `${o.toolName} (${o.phase||'call'})`; const t = String(c||''); try { const j = JSON.parse(t); if(j.tool||j.toolName) return `${j.tool||j.toolName}`; } catch {} return t.replace(/\s+/g,' ').trim().slice(0,80) || 'Tool call'; }
   toolText(c: any): string { const o = this.tryParse(c); return o ? JSON.stringify(o, null, 2) : String(c||''); }
+  /** Grouped tool events helpers for D14 */
+  toolGroupCount(content: any): number {
+    try { const j = typeof content === 'string' ? JSON.parse(content) : content; return Array.isArray(j) ? j.length : 1; } catch { return 1; }
+  }
+  toolGroupSummary(content: any): string {
+    try { const j = typeof content === 'string' ? JSON.parse(content) : content; if (Array.isArray(j)) return `Tools: ${j.map((x:any)=>x.tool||x.toolName||'?').join(', ')}`; if (content?.toolName) return `${content.toolName} (${content.phase})`; return 'Tools'; } catch { return 'Tools'; }
+  }
+  toolGroupText(content: any): string {
+    try { const j = typeof content === 'string' ? JSON.parse(content) : content; return Array.isArray(j) ? JSON.stringify(j, null, 2) : (content ? JSON.stringify(content, null, 2) : String(content)); } catch { return String(content); }
+  }
 
   ngOnDestroy(): void {
     if (this.selectedAgentId) this.drafts.set(this.selectedAgentId, this.promptText);

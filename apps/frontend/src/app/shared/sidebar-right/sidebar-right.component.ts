@@ -22,7 +22,7 @@ interface GraphNode extends ITaskQueue {
   agentLabel: string;
 }
 
-interface Edge { x1:number; y1:number; x2:number; y2:number; color:string; kind:'down'|'return-progress'|'return-final'; d:string; dashed:boolean; }
+interface Edge { x1:number; y1:number; x2:number; y2:number; color:string; kind:'down'|'return-progress'|'return-resolved-progress'|'return-final'; d:string; dashed:boolean; }
 
 @Component({
   selector: 'app-sidebar-right',
@@ -38,6 +38,7 @@ interface Edge { x1:number; y1:number; x2:number; y2:number; color:string; kind:
         <span class="leg" *ngFor="let a of agents"><i [style.background]="agentColor(a.id)"></i>{{a.nickname}}</span>
         <span class="leg key"><i class="line solid"></i>resuelto</span>
         <span class="leg key"><i class="line dashed"></i>en curso/pendiente</span>
+        <span class="leg key"><i class="line resolved-progress"></i>progreso reportado + resuelto</span>
       </div>
       <div class="timeline" #timeline>
         <svg class="graph" *ngIf="edges.length" [attr.width]="graphW" [attr.height]="graphH">
@@ -58,7 +59,7 @@ interface Edge { x1:number; y1:number; x2:number; y2:number; color:string; kind:
                 <p-tag [value]="n.status" [severity]="severity(n.status)"></p-tag>
               </div>
               <div class="task-route"><span [style.color]="agentColor(n.sender_agent_id)">{{ label(n.sender_agent_id) }}</span> → <span [style.color]="agentColor(n.receiver_agent_id)">{{ label(n.receiver_agent_id) }}</span></div>
-              @if (n.parent_task_id) { <div class="parent">parent: #{{ n.parent_task_id }} · {{ n.task_flow || 'direct' }}<ng-container *ngIf="n.isProgress"> (en curso)</ng-container><ng-container *ngIf="n.isFinal"> (resuelto)</ng-container></div> }
+              @if (n.parent_task_id) { <div class="parent">parent: #{{ n.parent_task_id }} · {{ n.task_flow || 'direct' }}<ng-container *ngIf="n.isProgress && !isResolvedProgress(n.id!)"> (en curso)</ng-container><ng-container *ngIf="n.isFinal"> (resuelto)</ng-container></div> }
               <div class="payload" [title]="fullText(n)">{{ preview(n.payload) }}</div>
             </div>
           } @empty {
@@ -78,6 +79,7 @@ interface Edge { x1:number; y1:number; x2:number; y2:number; color:string; kind:
     .leg i{width:8px;height:8px;border-radius:50%;display:inline-block}
     .leg.key i.line{width:14px;height:0;border-radius:0;border-top:2px solid var(--text-muted);background:transparent}
     .leg.key i.line.dashed{border-top-style:dashed;opacity:.8}
+    .leg.key i.line.resolved-progress { border-top-style: dotted; opacity: 0.6; border-width: 1px; }
     .timeline{position:relative}
     .graph{position:absolute;left:0;top:0;pointer-events:none;overflow:visible}
     .graph .node{pointer-events:auto;cursor:pointer}
@@ -191,6 +193,13 @@ export class SidebarRightComponent implements OnInit, AfterViewInit, OnDestroy {
       }
       hasFinalDesc[id] = false; return false;
     };
+    // determine which progress nodes have been resolved (their branch got a final desc)
+    const resolvedProgressSet: Set<number> = new Set();
+    this.nodes.filter(n => n.isProgress).forEach(p => {
+      if (p.parent_task_id && isClosed(p.parent_task_id as any, new Set())) {
+        resolvedProgressSet.add(p.id!);
+      }
+    });
 
     this.nodes.forEach((n, i) => {
       if (!n.parent_task_id) return;
@@ -200,14 +209,22 @@ export class SidebarRightComponent implements OnInit, AfterViewInit, OnDestroy {
       const x2 = this.cx(n), y2 = this.cy[i] || 0;
       const my = (y1 + y2) / 2;
       const d = `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
-      const isReturn = n.isReturn;
-      const dashed = n.isProgress || (!n.isProgress && !n.isFinal && isReturn ? false : (!n.isReturn && n.task_flow === 'direct' && !isClosed(n.id!) && parent));
-      // clearer: direct branch dashed if not yet closed by a final in its subtree; progress always dashed; final solid
-      const finalDashed = n.isProgress ? true : (n.isFinal ? false : (n.task_flow === 'direct' ? !isClosed(n.id!) : false));
-      const kind: Edge['kind'] = n.isProgress ? 'return-progress' : (n.isFinal ? 'return-final' : (n.task_flow === 'direct' ? 'down' : 'down'));
-      edges.push({ x1, y1, x2, y2, color: n.color, kind, d, dashed: finalDashed });
+      // Edge styling rules:
+      // - progress with resolved branch → dotted (resolved progress), dashed otherwise
+      // - final → solid
+      // - direct branch not yet closed → dashed; direct already closed → solid
+      let dashed = false;
+      if (n.isProgress) {
+        dashed = !resolvedProgressSet.has(n.id!);
+      } else if (n.isFinal) {
+        dashed = false;
+      } else {
+        dashed = n.task_flow === 'direct' ? !isClosed(n.id!) : false;
+      }
+      const kind: Edge['kind'] = n.isProgress ? (dashed ? 'return-progress' : 'return-resolved-progress') : (n.isFinal ? 'return-final' : (n.task_flow === 'direct' ? 'down' : 'down'));
+      edges.push({ x1, y1, x2, y2, color: n.color, kind, d, dashed });
     });
-    // outer spine (depth 0 lane) for continuity
+    // outer spine (depth 0 lane) for continuity — always solid
     if (this.nodes.length) {
       const x = 10; const ys = this.cy; if (ys.length > 1) edges.unshift({ x1:x,y1:ys[0],x2:x,y2:ys[ys.length-1],color:'var(--border-color,#334155)',kind:'down', d:`M ${x} ${ys[0]} L ${x} ${ys[ys.length-1]}`, dashed:false });
     }
@@ -247,6 +264,28 @@ export class SidebarRightComponent implements OnInit, AfterViewInit, OnDestroy {
 
   severity(status: string): 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'contrast' {
     switch (status) { case 'COMPLETED': return 'success'; case 'PROCESSING': return 'info'; case 'HOLD': case 'STOPPED': return 'warn'; case 'PENDING': return 'secondary'; default: return 'contrast'; }
+  }
+
+  /** Check if a progress node's branch was closed by a final result */
+  isResolvedProgress(id: number): boolean {
+    const idx = new Map<number, number>();
+    this.nodes.forEach((n, i) => { if (n.id != null) idx.set(n.id, i); });
+    const children: Record<number, number[]> = {};
+    this.nodes.forEach(n => { if (n.parent_task_id) { (children[n.parent_task_id] ||= []).push(n.id!); } });
+    const isClosed = (targetId: number, seen = new Set<number>()): boolean => {
+      if (seen.has(targetId)) return false;
+      seen.add(targetId);
+      for (const cid of (children[targetId] || [])) {
+        const c = this.nodes[idx.get(cid)!];
+        if (c?.isFinal) return true;
+        if (isClosed(cid, seen)) return true;
+      }
+      return false;
+    };
+    // For progress node, check if its parent chain leads to a closed branch
+    const node = this.nodes.find(n => n.id === id);
+    if (!node?.parent_task_id) return false;
+    return isClosed(node.parent_task_id!, new Set());
   }
 
   clearLineage(): void {

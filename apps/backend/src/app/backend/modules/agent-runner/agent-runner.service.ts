@@ -269,7 +269,7 @@ export class AgentRunnerService implements OnModuleInit {
       const delegateTaskTool = defineTool({
         name: 'delegate_task',
         label: 'Delegate Task',
-        description: 'Delega una tarea a otro agente por nickname EXACTO (solo el alias, p.ej. "Bob"; NO uses "Bob (WORKER)"). Asíncrono: NO esperes/pollees; termina tu turno y el resultado llegará como [DELEGATION RESULT]. En "instruction" pasa el PLAN COMPLETO para el agente (sub-objetivos, qué debe hacer con su resultado y a quién devolverlo).',
+        description: 'Delega una tarea a otro agente por nickname EXACTO (solo el alias, p.ej. "Bob"; NO uses "Bob (WORKER)"). Asíncrono: NO esperes/pollees; termina tu turno y el resultado llegará como [DELEGATION RESULT]. En "instruction" pasa el PLAN COMPLETO para el agente (sub-objetivos, qué debe hacer con su resultado y a quién devolverlo). NO uses delegate_task para reportar/informar resultados al solicitante o a quien te delegó: devuelve el resultado en tu respuesta y el runtime lo enruta.',
         parameters: Type.Object({
           target_agent_nickname: Type.String({ description: 'Nickname EXACTO del agente destino (solo alias, ej. "Pam"; sin sufijo de rol)' }),
           instruction: Type.String({ description: 'Instrucción/plan completo para el agente destino' }),
@@ -277,7 +277,27 @@ export class AgentRunnerService implements OnModuleInit {
         async execute(_toolCallId, params) {
           const target = await identityResolverService.resolveNickname(params.target_agent_nickname, workspaceId);
           if (!target) return { content: [{ type: 'text' as const, text: `Agent not found: "${params.target_agent_nickname}". Usa el nickname EXACTO (solo alias, ej. "Bob") de [EQUIPO].` }], details: { taskId: 0 } };
-          const nextDepth = Math.min(parentDepth + 1, 10);
+
+          // Guards de delegación (state-aware, anti-eco, sin romper continuación):
+          // - PROGRESS (intermedio): no delegar ni tocar la subcadena; esperar RESULT final de la request.
+          // - RESULT/FINAL (request resuelta): se permite avanzar el plan con el siguiente paso (incluso hacia el emisor del callback si corresponde); nunca re-delegar/rebotar el resultado ya entregado.
+          // - En tareas no-callback: no delegar al remitente para "reportar" (el runtime enruta el resultado).
+          const flowNow = (task as any).task_flow || 'direct';
+          const senderOfThisTask = (task as any).sender_agent_id;
+          const isProgressCb = flowNow === 'delegation_progress';
+          const isFinalResultCb = flowNow === 'delegation_result' || ((task as any).callback_final === true && !isProgressCb);
+          if (isProgressCb) {
+            return { content: [{ type: 'text' as const, text: `Callback [DELEGATION PROGRESS] (state=PROGRESS, request en curso): registra el avance y espera el [DELEGATION RESULT] final de esa request/branch; no delegues ni crees tareas en esta subcadena.` }], details: { taskId: 0 } };
+          }
+          if (!isFinalResultCb && target.id === senderOfThisTask && senderOfThisTask !== 'user') {
+            return { content: [{ type: 'text' as const, text: `No delegues al remitente (${params.target_agent_nickname}) para reportar. Devuelve el resultado en tu respuesta; el runtime lo enruta.` }], details: { taskId: 0 } };
+          }
+          // F5: depth/cycle guard
+          const nextDepth = parentDepth + 1;
+          if (nextDepth > 8) {
+            return { content: [{ type: 'text' as const, text: `Delegación bloqueada: profundidad máxima alcanzada (depth ${nextDepth}). Resuelve localmente y devuelve el resultado.` }], details: { taskId: 0 } };
+          }
+
           const newTask = await taskQueueRepository.add({
             sender_agent_id: senderAgentId,
             receiver_agent_id: target.id,
@@ -286,7 +306,7 @@ export class AgentRunnerService implements OnModuleInit {
             parent_task_id: currentTaskId,
             workspace_id: workspaceId,
             task_flow: 'direct',
-            depth: nextDepth,
+            depth: Math.min(nextDepth, 8),
             depth_path: `${parentDepthPath}/${target.nickname}`,
             parent_task_callback: false,
             callback_context: task.payload, // original instruction so the delegator can resume
@@ -504,108 +524,151 @@ export class AgentRunnerService implements OnModuleInit {
         // Delegation return (progress vs final):
         // - If this turn delegated: send a DELEGATION PROGRESS ack to the immediate sender (wakes them; not final), then wait for callback chain.
         // - If consuming a callback/progress and did NOT delegate further: this is the final synthesis for the branch -> send DELEGATION RESULT (final) to the origin delegator.
-        // - If consuming and delegated further: send progress and wait for sub-chain.
+        // - If consuming and delegated further: send progress and wait for sub-chain (to origin delegator, never down to leaf sender).
         // - If direct task and did NOT delegate: send DELEGATION RESULT (final) to immediate sender.
         if (task.sender_agent_id && task.sender_agent_id !== 'user') {
           const incomingCallback = isDelegationCallback;
+          const resolveOrigin = async (skipIds: Set<number> = new Set()) => {
+            let origin: any = null;
+            try {
+              let cur: any = task;
+              const seen = new Set<number>();
+              while (cur && cur.parent_task_id && !seen.has(cur.id)) {
+                seen.add(cur.id);
+                const p = await this.taskQueueRepository.get(cur.parent_task_id);
+                if (!p) break;
+                const pFlow = (p as any).task_flow || 'direct';
+                if (pFlow === 'direct' && p.receiver_agent_id === agent.id && !skipIds.has(p.id)) { origin = p; break; }
+                cur = p;
+              }
+            } catch {}
+            return origin;
+          };
+
+          // idempotency guard for callback enqueues (avoids duplicates/echo races)
+          const recentCallbackKeys = (this as any)._recentCallbackKeys || ((this as any)._recentCallbackKeys = new Map<string, number>());
+          const shouldEnqueueCallback = (key: string) => {
+            const now = Date.now();
+            for (const [k, ts] of recentCallbackKeys) { if (now - ts > 30000) recentCallbackKeys.delete(k); }
+            if (recentCallbackKeys.has(key)) return false;
+            recentCallbackKeys.set(key, now);
+            return true;
+          };
+
           if (incomingCallback) {
             this.trace.record({ runId, agentId: agent.id, eventType: 'callback_processed', taskId: task.id, workspaceId, eventData: { depth: (task as any).depth ?? 0, delegatedThisRun, flow: (task as any).task_flow } }).catch(() => {});
-            if (!delegatedThisRun) {
-              // final synthesis for this branch -> report to origin delegator (ancestor direct task received by this agent)
-              let origin: any = null;
-              try {
-                let cur: any = task;
-                const seen = new Set<number>();
-                while (cur && cur.parent_task_id && !seen.has(cur.id)) {
-                  seen.add(cur.id);
-                  const p = await this.taskQueueRepository.get(cur.parent_task_id);
-                  if (!p) break;
-                  const pFlow = (p as any).task_flow || 'direct';
-                  if (pFlow === 'direct' && p.receiver_agent_id === agent.id) { origin = p; break; }
-                  cur = p;
-                }
-              } catch {}
-              const targetSender = origin?.sender_agent_id || task.sender_agent_id;
-              const originDepth = Math.max(0, Number((origin as any)?.depth ?? (task as any).depth ?? 0));
-              const originPath = String((origin as any)?.depth_path || (task as any).depth_path || `/root/${agent.nickname}`);
-              if (targetSender && targetSender !== 'user') {
-                await this.taskQueueRepository.add({
-                  sender_agent_id: agent.id,
-                  receiver_agent_id: targetSender,
-                  payload: `[DELEGATION RESULT from ${agent.nickname} (task #${task.id}, origin #${origin?.id ?? task.id})]\n${responseText}`,
-                  status: 'PENDING' as any,
-                  parent_task_id: task.id,
-                  workspace_id: workspaceId,
-                  task_flow: 'delegation_result',
-                  depth: originDepth,
-                  depth_path: `${originPath}/result`,
-                  parent_task_callback: true,
-                  callback_final: true,
-                  callback_context: (origin as any)?.callback_context ?? (task as any).callback_context ?? (origin as any)?.payload ?? task.payload,
-                  created_at: new Date(),
-                } as any);
-                this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_final_enqueued', taskId: task.id, workspaceId, eventData: { to: targetSender, depth: originDepth, originTaskId: origin?.id ?? null } }).catch(() => {});
+            let origin = await resolveOrigin();
+            let targetSender = origin?.sender_agent_id || task.sender_agent_id;
+
+            // Anti-echo: a synthesized RESULT must not bounce back to the immediate callback sender (ping-pong). Climb to higher origin; if none, close (response already produced).
+            if (!delegatedThisRun && targetSender && targetSender === (task as any).sender_agent_id && (task as any).sender_agent_id !== 'user') {
+              const skip = new Set<number>();
+              if (origin?.id) skip.add(origin.id);
+              const higher = await resolveOrigin(skip);
+              if (higher?.sender_agent_id && higher.sender_agent_id !== (task as any).sender_agent_id) {
+                origin = higher; targetSender = higher.sender_agent_id;
               } else {
-                this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_consumed', taskId: task.id, workspaceId, eventData: { returnedTo: targetSender } }).catch(() => {});
+                console.log(`[AgentRunner][${agent.nickname}] Anti-echo: suppressed result bounce to ${task.sender_agent_id} for callback task #${task.id}`);
+                targetSender = null;
+              }
+            }
+
+            const originDepth = Math.max(0, Number((origin as any)?.depth ?? (task as any).depth ?? 0));
+            const originPath = String((origin as any)?.depth_path || (task as any).depth_path || `/root/${agent.nickname}`);
+
+            if (!delegatedThisRun) {
+              // final synthesis for this branch -> report to origin delegator
+              if (targetSender && targetSender !== 'user') {
+                const key = `${workspaceId}|${targetSender}|${origin?.id ?? task.id}|delegation_result|1`;
+                if (shouldEnqueueCallback(key)) {
+                  await this.taskQueueRepository.add({
+                    sender_agent_id: agent.id,
+                    receiver_agent_id: targetSender,
+                    payload: `[DELEGATION RESULT from ${agent.nickname} | state=FINAL | task=#${task.id} | request=#${origin?.id ?? task.id} | origin=#${origin?.id ?? task.id} | parent=#${(task as any).parent_task_id ?? '-'} | depth=${originDepth} | branch=${originPath}/result]\n${responseText}`,
+                    status: 'PENDING' as any,
+                    parent_task_id: task.id,
+                    workspace_id: workspaceId,
+                    task_flow: 'delegation_result',
+                    depth: originDepth,
+                    depth_path: `${originPath}/result`,
+                    parent_task_callback: true,
+                    callback_final: true,
+                    callback_context: (origin as any)?.callback_context ?? (task as any).callback_context ?? (origin as any)?.payload ?? task.payload,
+                    created_at: new Date(),
+                  } as any);
+                  this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_final_enqueued', taskId: task.id, workspaceId, eventData: { to: targetSender, depth: originDepth, originTaskId: origin?.id ?? null } }).catch(() => {});
+                }
+              } else {
+                this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_consumed', taskId: task.id, workspaceId, eventData: { returnedTo: targetSender || 'closed' } }).catch(() => {});
               }
             } else {
-              // delegated further while consuming; intermediate progress + wait for sub-chain
-              const progDepth = Math.max(0, Number((task as any).depth ?? parentDepth));
-              await this.taskQueueRepository.add({
-                sender_agent_id: agent.id,
-                receiver_agent_id: task.sender_agent_id,
-                payload: `[DELEGATION PROGRESS from ${agent.nickname} (task #${task.id})]\n${responseText}`,
-                status: 'PENDING' as any,
-                parent_task_id: task.id,
-                workspace_id: workspaceId,
-                task_flow: 'delegation_progress',
-                depth: progDepth,
-                depth_path: `${(task as any).depth_path || parentDepthPath}/progress`,
-                parent_task_callback: true,
-                callback_final: false,
-                callback_context: (task as any).callback_context ?? task.payload,
-                created_at: new Date(),
-              } as any);
-              this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_progress_enqueued', taskId: task.id, workspaceId, eventData: { to: task.sender_agent_id, depth: progDepth } }).catch(() => {});
+              // delegated further while consuming; intermediate progress must bubble UP to origin delegator (F3), never down to leaf
+              if (targetSender && targetSender !== 'user') {
+                const key = `${workspaceId}|${targetSender}|${origin?.id ?? task.id}|delegation_progress|0`;
+                if (shouldEnqueueCallback(key)) {
+                  await this.taskQueueRepository.add({
+                    sender_agent_id: agent.id,
+                    receiver_agent_id: targetSender,
+                    payload: `[DELEGATION PROGRESS from ${agent.nickname} | state=PROGRESS(intermedio,no-final) | task=#${task.id} | request=#${origin?.id ?? task.id} | origin=#${origin?.id ?? task.id} | parent=#${(task as any).parent_task_id ?? '-'} | depth=${originDepth} | branch=${originPath}/progress]\n${responseText}`,
+                    status: 'PENDING' as any,
+                    parent_task_id: task.id,
+                    workspace_id: workspaceId,
+                    task_flow: 'delegation_progress',
+                    depth: originDepth,
+                    depth_path: `${originPath}/progress`,
+                    parent_task_callback: true,
+                    callback_final: false,
+                    callback_context: (origin as any)?.callback_context ?? (task as any).callback_context ?? task.payload,
+                    created_at: new Date(),
+                  } as any);
+                  this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_progress_enqueued', taskId: task.id, workspaceId, eventData: { to: targetSender, depth: originDepth } }).catch(() => {});
+                }
+              }
               this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_waiting_subchain', taskId: task.id, workspaceId, eventData: { depth: (task as any).depth ?? 0 } }).catch(() => {});
             }
           } else {
             const cbDepth = Math.max(0, parentDepth);
             if (!delegatedThisRun) {
-              await this.taskQueueRepository.add({
-                sender_agent_id: agent.id,
-                receiver_agent_id: task.sender_agent_id,
-                payload: `[DELEGATION RESULT from ${agent.nickname} (task #${task.id}, parent #${task.parent_task_id ?? '-'})]\n${responseText}`,
-                status: 'PENDING' as any,
-                parent_task_id: task.id,
-                workspace_id: workspaceId,
-                task_flow: 'delegation_result',
-                depth: cbDepth,
-                depth_path: `${parentDepthPath}/result`,
-                parent_task_callback: true,
-                callback_final: true,
-                callback_context: (task as any).callback_context ?? task.payload,
-                created_at: new Date(),
-              } as any);
-              this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_final_enqueued', taskId: task.id, workspaceId, eventData: { to: task.sender_agent_id, depth: cbDepth } }).catch(() => {});
+              const key = `${workspaceId}|${task.sender_agent_id}|${task.id}|delegation_result|1|direct`;
+              if (shouldEnqueueCallback(key)) {
+                await this.taskQueueRepository.add({
+                  sender_agent_id: agent.id,
+                  receiver_agent_id: task.sender_agent_id,
+                  payload: `[DELEGATION RESULT from ${agent.nickname} | state=FINAL | task=#${task.id} | request=#${task.id} | origin=#${task.id} | parent=#${(task as any).parent_task_id ?? '-'} | depth=${cbDepth} | branch=${parentDepthPath}/result]\n${responseText}`,
+                  status: 'PENDING' as any,
+                  parent_task_id: task.id,
+                  workspace_id: workspaceId,
+                  task_flow: 'delegation_result',
+                  depth: cbDepth,
+                  depth_path: `${parentDepthPath}/result`,
+                  parent_task_callback: true,
+                  callback_final: true,
+                  callback_context: (task as any).callback_context ?? task.payload,
+                  created_at: new Date(),
+                } as any);
+                this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_final_enqueued', taskId: task.id, workspaceId, eventData: { to: task.sender_agent_id, depth: cbDepth } }).catch(() => {});
+              }
             } else {
               // delegated during this turn: send intermediate progress (wakes delegator) but not final
-              await this.taskQueueRepository.add({
-                sender_agent_id: agent.id,
-                receiver_agent_id: task.sender_agent_id,
-                payload: `[DELEGATION PROGRESS from ${agent.nickname} (task #${task.id})]\n${responseText}`,
-                status: 'PENDING' as any,
-                parent_task_id: task.id,
-                workspace_id: workspaceId,
-                task_flow: 'delegation_progress',
-                depth: cbDepth,
-                depth_path: `${parentDepthPath}/progress`,
-                parent_task_callback: true,
-                callback_final: false,
-                callback_context: (task as any).callback_context ?? task.payload,
-                created_at: new Date(),
-              } as any);
-              this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_progress_enqueued', taskId: task.id, workspaceId, eventData: { to: task.sender_agent_id, depth: cbDepth } }).catch(() => {});
+              const key = `${workspaceId}|${task.sender_agent_id}|${task.id}|delegation_progress|0|direct`;
+              if (shouldEnqueueCallback(key)) {
+                await this.taskQueueRepository.add({
+                  sender_agent_id: agent.id,
+                  receiver_agent_id: task.sender_agent_id,
+                  payload: `[DELEGATION PROGRESS from ${agent.nickname} | state=PROGRESS(intermedio,no-final) | task=#${task.id} | request=#${task.id} | origin=#${task.id} | parent=#${(task as any).parent_task_id ?? '-'} | depth=${cbDepth} | branch=${parentDepthPath}/progress]\n${responseText}`,
+                  status: 'PENDING' as any,
+                  parent_task_id: task.id,
+                  workspace_id: workspaceId,
+                  task_flow: 'delegation_progress',
+                  depth: cbDepth,
+                  depth_path: `${parentDepthPath}/progress`,
+                  parent_task_callback: true,
+                  callback_final: false,
+                  callback_context: (task as any).callback_context ?? task.payload,
+                  created_at: new Date(),
+                } as any);
+                this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_progress_enqueued', taskId: task.id, workspaceId, eventData: { to: task.sender_agent_id, depth: cbDepth } }).catch(() => {});
+              }
             }
           }
         }
