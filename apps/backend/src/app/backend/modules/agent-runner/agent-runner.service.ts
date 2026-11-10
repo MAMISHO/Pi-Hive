@@ -16,6 +16,8 @@ import { IWorkspaceRepository, IWorkspaceRepositoryToken } from '../workspace/do
 import { IdentityResolverService } from './identity-resolver.service.js';
 import { PromptBuilderService } from './prompt-builder.service.js';
 import { RunTraceService } from './run-trace.service.js';
+import { DelegationPlannerService } from './delegation-planner.service.js';
+import { DelegationPlanStore } from './delegation-plan.store.js';
 import { taskEventEmitter } from '../task-queue/infra/persistence/sequalize/entities/task-queue.schema.js';
 import { AgentStatus } from '../agent/domain/models/agent-status.enum.js';
 import { AgentSessionHistoryEntity } from '../session-history/infra/persistence/sequalize/entities/agent-session-history.schema.js';
@@ -40,6 +42,8 @@ export class AgentRunnerService implements OnModuleInit {
     @Inject(IdentityResolverService) private identityResolverService: IdentityResolverService,
     @Inject(PromptBuilderService) private promptBuilder: PromptBuilderService,
     @Inject(RunTraceService) private trace: RunTraceService,
+    @Inject(DelegationPlannerService) private delegationPlanner: DelegationPlannerService,
+    @Inject(DelegationPlanStore) private planStore: DelegationPlanStore,
   ) {
     console.log('[AgentRunner] constructed');
   }
@@ -55,6 +59,7 @@ export class AgentRunnerService implements OnModuleInit {
       callback_final: t.callback_final ?? null,
       created_at: t.created_at,
       parent_task_id: t.parent_task_id ?? null,
+      plan_ref: t.plan_ref ?? null,
     }));
     agentEventEmitter.emit('agent:queue:updated', {
       agentId, workspaceId: workspaceId ?? null, currentTaskId,
@@ -258,14 +263,82 @@ export class AgentRunnerService implements OnModuleInit {
       const cwd = (workspace?.path && fs.existsSync(workspace.path)) ? workspace.path : process.cwd();
       const availableAgents = await this.identityResolverService.getAvailableAgents(workspaceId);
 
+      const resolved = await this.resolveAgentModel(agent);
+      if (!resolved.ok) {
+        const r = resolved as { reason: string; raw?: string };
+        const reason = `model_not_found: ${r.reason}`;
+        console.warn(`[AgentRunner] ${agent.id} task=${task.id} ${reason}`);
+        agentEventEmitter.emit('agent:run:error', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'model_not_found', message: r.reason, emittedAt: Date.now() });
+        task.status = 'HOLD' as any;
+        (task as any).response = `⚠️ Modelo no resuelto: ${r.reason}. Configura task_state.model (provider/modelId), p.ej. ollama/ornith-1.5:9b-16k-pi.`;
+        await this.taskQueueRepository.update(task);
+        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', (task as any).response, groupId).catch(() => {});
+        this.trace.modelNotFound(runId, agent.id, workspaceId, task.id, r.reason).catch(() => {});
+        this.trace.close(runId, agent.id, workspaceId, task.id, 'model_not_found', r.reason, Date.now() - startedAt, false).catch(() => {});
+        agent.status = AgentStatus.IDLE;
+        await this.agentRepository.update(agent);
+        this.emitStatus(agent.id, agent.status, workspaceId, task.id, runId, 'model_not_found');
+        this.currentTaskByAgent.delete(agent.id);
+        this.emitQueueState(agent.id, workspaceId);
+        return;
+      }
+
+      const agentModel = resolved.model;
+      const agentRuntime = resolved.runtime;
+      const agentModelRaw = resolved.raw;
+
       const taskQueueRepository = this.taskQueueRepository;
       const identityResolverService = this.identityResolverService;
+      const delegationPlannerService = this.delegationPlanner;
+      const traceService = this.trace;
+      const planStore = this.planStore;
+      const runCtx = { runId, agentId: agent.id, workspaceId, taskId: task.id };
       const currentTaskId = task.id;
       const senderAgentId = agent.id;
       const parentDepth = Number((task as any).depth ?? 0);
       const parentDepthPath = String((task as any).depth_path || `/root/${agent.nickname}`);
+      const flowForTools = (task as any).task_flow || 'direct';
+      const isProgressFlowForTools = flowForTools === 'delegation_progress';
+      const rosterForPlanner = availableAgents
+        .filter((a: any) => a.id !== agent.id)
+        .map((a: any) => ({ nickname: a.nickname, role: a.role, id: a.id }));
 
       let delegatedThisRun = false;
+      let delegationPlannedThisRun = false;
+      let activePlanRef: number | null = (task as any).plan_ref ?? null;
+
+      // Resolve delegation plan state for this branch (optional: absent => normal no-plan flow).
+      const resolvePlanRefFromChain = async (): Promise<number | null> => {
+        if ((task as any).plan_ref != null) return Number((task as any).plan_ref);
+        try {
+          let cur: any = task;
+          const seen = new Set<number>();
+          for (let i = 0; i < 12 && cur; i++) {
+            if (cur.plan_ref != null) return Number(cur.plan_ref);
+            const pid = cur.parent_task_id ?? null;
+            if (!pid || seen.has(Number(pid))) break;
+            seen.add(Number(pid));
+            cur = await taskQueueRepository.get(Number(pid)).catch(() => null);
+          }
+        } catch {}
+        return null;
+      };
+      if (activePlanRef == null) activePlanRef = await resolvePlanRefFromChain();
+      const loadActivePlan = async () => (activePlanRef != null ? await planStore.get(activePlanRef) : null);
+      let activePlan = await loadActivePlan();
+      if (activePlan && activePlan.state === 'active' && (task as any).task_flow === 'delegation_result') {
+        const cur = Math.max(0, Math.min(activePlan.cursor, Math.max(activePlan.steps.length - 1, 0)));
+        const step = activePlan.steps[cur];
+        if (step && step.status !== 'done') {
+          step.status = 'done';
+          step.result_ref = Number(task.id);
+          activePlan.cursor = cur + 1;
+          if (activePlan.cursor >= activePlan.steps.length) activePlan.state = 'done';
+          await planStore.save(activePlan);
+          traceService.record({ ...runCtx, eventType: activePlan.state === 'done' ? 'plan_closed' : 'plan_step_advanced', eventData: { plan_ref: activePlanRef, cursor: activePlan.cursor, total: activePlan.steps.length, result_task: task.id } }).catch(() => {});
+        }
+      }
+
       const delegateTaskTool = defineTool({
         name: 'delegate_task',
         label: 'Delegate Task',
@@ -298,44 +371,126 @@ export class AgentRunnerService implements OnModuleInit {
             return { content: [{ type: 'text' as const, text: `Delegación bloqueada: profundidad máxima alcanzada (depth ${nextDepth}). Resuelve localmente y devuelve el resultado.` }], details: { taskId: 0 } };
           }
 
+          // Plan-aware validation (only when an active structured plan exists for this branch)
+          let planDeviation: string | null = null;
+          if (activePlanRef != null) {
+            const p = await loadActivePlan();
+            if (p && p.state === 'active' && p.steps && p.steps.length) {
+              const cur = Math.max(0, Math.min(p.cursor, Math.max(p.steps.length - 1, 0)));
+              const step = p.steps[cur];
+              if (step) {
+                const norm = (s: string) => String(s || '').trim().toLowerCase();
+                if (norm(step.destino) && norm(step.destino) !== norm(target.nickname)) {
+                  planDeviation = `El tracking (plan_ref=${p.plan_ref}, paso ${cur + 1}/${p.steps.length}) exige destino "${step.destino}"; intentaste delegar a "${target.nickname}". Ejecuta el paso indicado (respeta intermediarios) o ajusta la instrucción al paso actual.`;
+                  traceService.record({ ...runCtx, eventType: 'plan_deviation', eventData: { plan_ref: p.plan_ref, cursor: cur + 1, expected: step.destino, attempted: target.nickname } }).catch(() => {});
+                  return { content: [{ type: 'text' as const, text: `Delegación bloqueada por tracking: ${planDeviation}` }], details: { taskId: 0, blocked: true } } as any;
+                }
+              }
+            }
+          }
+
+          const effectivePlanRef = activePlanRef != null ? activePlanRef : ((task as any).plan_ref ?? null);
+          const nextDepthCapped = Math.min(nextDepth, 8);
+          const nextBranch = `${parentDepthPath}/${target.nickname}`;
+          const originForHeader = originCtx?.origin;
+          const originTag = originForHeader ? `${originForHeader.nickname}${originForHeader.role ? `(${originForHeader.role})` : ''}` : 'unknown';
+          const rootTag = originCtx?.rootTaskId ? `origin=#${originCtx.rootTaskId}` : `origin=#${task.id}`;
+          const reqTag = originCtx?.requestId ? `request=#${originCtx.requestId}` : `request=#${task.id}`;
+          const delegatedPayload = `[DELEGATION | from=${agent.nickname}(${agent.role}, id=${agent.id}) | to=${target.nickname}(${target.role}) | task->new | ${reqTag} | ${rootTag} | parent=#${currentTaskId} | depth=${nextDepthCapped} | branch=${nextBranch} | chain_origin=${originTag}]\n${params.instruction}`;
           const newTask = await taskQueueRepository.add({
             sender_agent_id: senderAgentId,
             receiver_agent_id: target.id,
-            payload: params.instruction,
+            payload: delegatedPayload,
             status: 'PENDING' as any,
             parent_task_id: currentTaskId,
             workspace_id: workspaceId,
             task_flow: 'direct',
-            depth: Math.min(nextDepth, 8),
-            depth_path: `${parentDepthPath}/${target.nickname}`,
+            depth: nextDepthCapped,
+            depth_path: nextBranch,
             parent_task_callback: false,
             callback_context: task.payload, // original instruction so the delegator can resume
+            plan_ref: effectivePlanRef,
             created_at: new Date(),
           } as any);
           delegatedThisRun = true;
-          return { content: [{ type: 'text' as const, text: `Delegated task ${newTask.id} to ${target.nickname} (depth ${nextDepth}). Recibirás un [DELEGATION RESULT] — NO esperes/pollees; completa tu turno y continúa cuando llegue.` }], details: { taskId: Number(newTask.id) } };
+          return { content: [{ type: 'text' as const, text: `Delegated task ${newTask.id} to ${target.nickname} (depth ${nextDepth}${effectivePlanRef != null ? `, plan_ref ${effectivePlanRef}` : ''}). Recibirás un [DELEGATION RESULT] — NO esperes/pollees; completa tu turno y continúa cuando llegue.` }], details: { taskId: Number(newTask.id) } };
         },
       });
 
-      const resolved = await this.resolveAgentModel(agent);
-      if (!resolved.ok) {
-        const r = resolved as { reason: string; raw?: string };
-        const reason = `model_not_found: ${r.reason}`;
-        console.warn(`[AgentRunner] ${agent.id} task=${task.id} ${reason}`);
-        agentEventEmitter.emit('agent:run:error', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'model_not_found', message: r.reason, emittedAt: Date.now() });
-        task.status = 'HOLD' as any;
-        (task as any).response = `⚠️ Modelo no resuelto: ${r.reason}. Configura task_state.model (provider/modelId), p.ej. ollama/ornith-1.5:9b-16k-pi.`;
-        await this.taskQueueRepository.update(task);
-        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', (task as any).response, groupId).catch(() => {});
-        this.trace.modelNotFound(runId, agent.id, workspaceId, task.id, r.reason).catch(() => {});
-        this.trace.close(runId, agent.id, workspaceId, task.id, 'model_not_found', r.reason, Date.now() - startedAt, false).catch(() => {});
-        agent.status = AgentStatus.IDLE;
-        await this.agentRepository.update(agent);
-        this.emitStatus(agent.id, agent.status, workspaceId, task.id, runId, 'model_not_found');
-        this.currentTaskByAgent.delete(agent.id);
-        this.emitQueueState(agent.id, workspaceId);
-        return;
-      }
+      const planDelegationTool = defineTool({
+        name: 'plan_delegation',
+        label: 'Plan Delegation',
+        description: 'Genera y fija un tracking de ruta (PLAN/PARADA, vinculante y persistente en la rama) para coordinar delegaciones. Úsala cuando la orden requiera coordinación entre agentes: cadena/secuencia de pasos, 2+ agentes involucrados, intermediarios que deben mediar/reenviar (A→B→C y retorno), ida-vuelta o dependencias entre resultados. Cómo adquirirlo: llámala UNA vez al inicio del turno con user_task = la orden/objetivo original COMPLETO; devuelve el tracking a seguir (o un aviso de fallo, en cuyo caso continúas con tu criterio). No la uses para conversación directa, tareas que resuelves tú solo, o durante [DELEGATION PROGRESS].',
+        parameters: Type.Object({
+          user_task: Type.String({ description: 'Orden/objetivo original completo a planificar (incluye la cadena, intermediarios y resultado esperado)' }),
+        }),
+        async execute(_toolCallId, params) {
+          if (isProgressFlowForTools) {
+            return { content: [{ type: 'text' as const, text: 'plan_delegation no disponible durante [DELEGATION PROGRESS] (state=PROGRESS). Registra el avance y espera el [DELEGATION RESULT] final; no planifiques ni delegues en esta subcadena.' }], details: { ok: false } } as any;
+          }
+          if (delegationPlannedThisRun) {
+            return { content: [{ type: 'text' as const, text: 'plan_delegation ya fue invocada en este turno. Usa el tracking obtenido y ejecútalo paso a paso.' }], details: { ok: false } } as any;
+          }
+          delegationPlannedThisRun = true;
+          if (activePlanRef != null) {
+            const existing = await loadActivePlan();
+            if (existing) {
+              return { content: [{ type: 'text' as const, text: `Ya existe un tracking activo para esta rama (plan_ref=${activePlanRef}). Síguelo paso a paso:\n${planStore.formatForPrompt(existing)}` }], details: { ok: true, plan_ref: activePlanRef, steps: existing.steps.length } } as any;
+            }
+          }
+          const plannerInputTask = String(params.user_task || '').trim() || String((task as any).callback_context || task.payload || '').trim();
+          try {
+            const res = await delegationPlannerService.planOneShot({
+              model: agentModel,
+              runtime: agentRuntime,
+              userTask: plannerInputTask,
+              roster: rosterForPlanner,
+              cwd,
+              timeoutMs: 45_000,
+            });
+            const plannerMs = res.plannerMs ?? 0;
+            const plannerModel = agentModelRaw;
+            if (!res.ok || !res.plan || !res.steps || !res.steps.length) {
+              traceService.record({ ...runCtx, eventType: 'delegation_planned', eventData: { ok: false, reason: (res as any).reason || 'invalid_plan', plannerMs, plannerModel, steps: 0 } }).catch(() => {});
+              return { content: [{ type: 'text' as const, text: `No se pudo generar el plan de delegación (${(res as any).reason || 'plan inválido'}). Continúa con tu propio criterio: si la tarea requiere coordinación, delega el siguiente paso concreto con nickname exacto e instrucción completa.` }], details: { ok: false, reason: (res as any).reason } } as any;
+            }
+            activePlanRef = Number(currentTaskId);
+            (task as any).plan_ref = activePlanRef;
+            try { await taskQueueRepository.update(task as any); } catch {}
+            const planText = String(res.plan).trim();
+            await planStore.create({
+              plan_ref: activePlanRef,
+              root_task_id: Number(currentTaskId),
+              workspace_id: workspaceId ?? null,
+              owner_agent_id: agent.id,
+              requester: (task as any).sender_agent_id === 'user' ? 'user' : String((task as any).sender_agent_id || 'unknown'),
+              raw_text: planText,
+              steps: res.steps,
+              parada: (res as any).parada ?? null,
+              cursor: 0,
+              state: 'active',
+            });
+            activePlan = await loadActivePlan();
+            await AgentChatEventEntity.create({
+              workspace_id: workspaceId,
+              agent_id: agent.id,
+              task_id: Number(currentTaskId),
+              run_id: runId,
+              direction: 'OUTBOUND',
+              kind: 'plan',
+              group_id: groupId,
+              seq: null,
+              content: planText,
+              meta: { plan_ref: activePlanRef, steps: res.steps.length, plannerMs, plannerModel, structured: true },
+            } as any).catch(() => {});
+            traceService.record({ ...runCtx, eventType: 'delegation_planned', eventData: { ok: true, plannerMs, plannerModel, steps: res.steps.length, plan_ref: activePlanRef, structured: true } }).catch(() => {});
+            return { content: [{ type: 'text' as const, text: `Delegation tracking (sigue este plan paso a paso; respeta PARADA):\n${planStore.formatForPrompt(activePlan!)}` }], details: { ok: true, plan_ref: activePlanRef, steps: res.steps.length } } as any;
+          } catch (e: any) {
+            traceService.record({ ...runCtx, eventType: 'delegation_planned', eventData: { ok: false, reason: e?.message || String(e), plannerModel: agentModelRaw } }).catch(() => {});
+            return { content: [{ type: 'text' as const, text: `Fallo al planificar delegación (${e?.message || e}). Continúa con tu propio criterio y delega con nicknames exactos si hace falta.` }], details: { ok: false } } as any;
+          }
+        },
+      });
 
       let isResumed = false;
       let sessionManager: any;
@@ -359,6 +514,54 @@ export class AgentRunnerService implements OnModuleInit {
       const sender = (task as any).sender_agent_id === 'user'
         ? { nickname: 'user', role: 'USER', id: 'user' }
         : senderAgent ? { nickname: senderAgent.nickname, role: senderAgent.role, id: senderAgent.id } : { nickname: String((task as any).sender_agent_id || 'desconocido'), role: '', id: String((task as any).sender_agent_id || '') };
+
+      // Resolve chain origin (root requester/context) so deep agents know who ultimately requested this.
+      const resolveOriginContext = async () => {
+        try {
+          let cur: any = task;
+          const seen = new Set<number>();
+          let root: any = task;
+          for (let i = 0; i < 20 && cur; i++) {
+            root = cur;
+            const pid = cur.parent_task_id ?? null;
+            if (!pid || seen.has(Number(pid))) break;
+            seen.add(Number(pid));
+            const p = await taskQueueRepository.get(Number(pid)).catch(() => null);
+            if (!p) break;
+            cur = p;
+          }
+          const rootTask: any = root || task;
+          const rootSenderId = String(rootTask.sender_agent_id || '');
+          let origin: { nickname: string; role?: string; id?: string; rootTaskId?: number | null; rootUserPayload?: string | null };
+          if (rootSenderId === 'user') {
+            origin = { nickname: 'user', role: 'USER', id: 'user', rootTaskId: Number(rootTask.id), rootUserPayload: String(rootTask.payload || '') };
+          } else {
+            const oa = await this.identityResolverService.resolveById?.(rootSenderId) ?? (await this.identityResolverService.getAvailableAgents(workspaceId)).find((a: any) => a.id === rootSenderId) ?? null;
+            origin = oa
+              ? { nickname: oa.nickname, role: oa.role, id: oa.id, rootTaskId: Number(rootTask.id), rootUserPayload: String(rootTask.payload || '') }
+              : { nickname: rootSenderId || 'desconocido', role: '', id: rootSenderId, rootTaskId: Number(rootTask.id), rootUserPayload: String(rootTask.payload || '') };
+          }
+          // request id: nearest "direct" request in this branch (best-effort)
+          let reqId: number | null = null;
+          try {
+            let c: any = task; const s2 = new Set<number>();
+            for (let i = 0; i < 20 && c; i++) {
+              const flow = (c as any).task_flow || 'direct';
+              if (flow === 'direct' && c.receiver_agent_id === agent.id) { reqId = Number(c.id); break; }
+              if ((c as any).task_flow === 'direct' && reqId == null) reqId = Number(c.id);
+              const pid = c.parent_task_id ?? null; if (!pid || s2.has(Number(pid))) break; s2.add(Number(pid));
+              c = await taskQueueRepository.get(Number(pid)).catch(() => null);
+            }
+          } catch {}
+          if (reqId == null) reqId = Number(rootTask.id);
+          return { origin, requestId: reqId, rootTaskId: Number(rootTask.id) };
+        } catch {
+          return { origin: sender, requestId: Number(task.id), rootTaskId: Number(task.id) } as any;
+        }
+      };
+      const originCtx = await resolveOriginContext();
+      activePlan = await loadActivePlan();
+      const activePlanBlock = activePlan ? planStore.formatForPrompt(activePlan) : null;
       const promptText = await this.promptBuilder.build({
         agent,
         taskPayload: task.payload,
@@ -370,6 +573,11 @@ export class AgentRunnerService implements OnModuleInit {
         sender,
         depth: Number((task as any).depth ?? 0),
         depthPath: (task as any).depth_path ?? null,
+        planRef: activePlanRef ?? null,
+        planBlock: activePlanBlock,
+        origin: originCtx?.origin ?? null,
+        taskId: Number(task.id),
+        requestId: originCtx?.requestId ?? null,
       });
       const systemPrompt = await this.promptBuilder.buildSystem({ agent, team: availableAgents });
       this.trace.turnInput(runId, agent.id, workspaceId, task.id, 'turn', promptText.length).catch(() => {});
@@ -400,7 +608,7 @@ export class AgentRunnerService implements OnModuleInit {
       let resourceLoader: any = undefined;
       try { resourceLoader = new (DefaultResourceLoader as any)({ cwd, agentDir: path.join(process.cwd(), 'data', 'pi-agent'), systemPrompt }); } catch (e) { console.warn('[AgentRunner] DefaultResourceLoader unavailable, using prompt injection', e); }
       console.log(`[AgentRunner] prompt built (sys=${systemPrompt.length}, task=${promptText.length}), creating AgentSession model=${resolved.raw}...`);
-      const sessionOpts: any = { sessionManager, cwd, customTools: [delegateTaskTool], modelRuntime: resolved.runtime, model: resolved.model };
+      const sessionOpts: any = { sessionManager, cwd, customTools: [delegateTaskTool, planDelegationTool], modelRuntime: resolved.runtime, model: resolved.model };
       if (resourceLoader) sessionOpts.resourceLoader = resourceLoader;
       const { session, modelFallbackMessage } = await createAgentSession(sessionOpts) as any;
       if (modelFallbackMessage) {
@@ -555,6 +763,23 @@ export class AgentRunnerService implements OnModuleInit {
             return true;
           };
 
+          const resolvePlanRefForCallback = async (originTask: any): Promise<number | null> => {
+            const direct = (originTask as any)?.plan_ref ?? (task as any)?.plan_ref ?? activePlanRef ?? null;
+            if (direct != null) return Number(direct);
+            try {
+              let cur: any = originTask || task;
+              const seen = new Set<number>();
+              for (let i = 0; i < 12 && cur; i++) {
+                if (cur.plan_ref != null) return Number(cur.plan_ref);
+                const pid = cur.parent_task_id ?? null;
+                if (!pid || seen.has(Number(pid))) break;
+                seen.add(Number(pid));
+                cur = await this.taskQueueRepository.get(Number(pid)).catch(() => null);
+              }
+            } catch {}
+            return null;
+          };
+
           if (incomingCallback) {
             this.trace.record({ runId, agentId: agent.id, eventType: 'callback_processed', taskId: task.id, workspaceId, eventData: { depth: (task as any).depth ?? 0, delegatedThisRun, flow: (task as any).task_flow } }).catch(() => {});
             let origin = await resolveOrigin();
@@ -581,6 +806,7 @@ export class AgentRunnerService implements OnModuleInit {
               if (targetSender && targetSender !== 'user') {
                 const key = `${workspaceId}|${targetSender}|${origin?.id ?? task.id}|delegation_result|1`;
                 if (shouldEnqueueCallback(key)) {
+                  const cbPlanRef = await resolvePlanRefForCallback(origin || task);
                   await this.taskQueueRepository.add({
                     sender_agent_id: agent.id,
                     receiver_agent_id: targetSender,
@@ -594,9 +820,10 @@ export class AgentRunnerService implements OnModuleInit {
                     parent_task_callback: true,
                     callback_final: true,
                     callback_context: (origin as any)?.callback_context ?? (task as any).callback_context ?? (origin as any)?.payload ?? task.payload,
+                    plan_ref: cbPlanRef,
                     created_at: new Date(),
                   } as any);
-                  this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_final_enqueued', taskId: task.id, workspaceId, eventData: { to: targetSender, depth: originDepth, originTaskId: origin?.id ?? null } }).catch(() => {});
+                  this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_final_enqueued', taskId: task.id, workspaceId, eventData: { to: targetSender, depth: originDepth, originTaskId: origin?.id ?? null, plan_ref: cbPlanRef } }).catch(() => {});
                 }
               } else {
                 this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_consumed', taskId: task.id, workspaceId, eventData: { returnedTo: targetSender || 'closed' } }).catch(() => {});
@@ -606,6 +833,7 @@ export class AgentRunnerService implements OnModuleInit {
               if (targetSender && targetSender !== 'user') {
                 const key = `${workspaceId}|${targetSender}|${origin?.id ?? task.id}|delegation_progress|0`;
                 if (shouldEnqueueCallback(key)) {
+                  const cbPlanRef = await resolvePlanRefForCallback(origin || task);
                   await this.taskQueueRepository.add({
                     sender_agent_id: agent.id,
                     receiver_agent_id: targetSender,
@@ -619,9 +847,10 @@ export class AgentRunnerService implements OnModuleInit {
                     parent_task_callback: true,
                     callback_final: false,
                     callback_context: (origin as any)?.callback_context ?? (task as any).callback_context ?? task.payload,
+                    plan_ref: cbPlanRef,
                     created_at: new Date(),
                   } as any);
-                  this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_progress_enqueued', taskId: task.id, workspaceId, eventData: { to: targetSender, depth: originDepth } }).catch(() => {});
+                  this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_progress_enqueued', taskId: task.id, workspaceId, eventData: { to: targetSender, depth: originDepth, plan_ref: cbPlanRef } }).catch(() => {});
                 }
               }
               this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_waiting_subchain', taskId: task.id, workspaceId, eventData: { depth: (task as any).depth ?? 0 } }).catch(() => {});
@@ -631,6 +860,7 @@ export class AgentRunnerService implements OnModuleInit {
             if (!delegatedThisRun) {
               const key = `${workspaceId}|${task.sender_agent_id}|${task.id}|delegation_result|1|direct`;
               if (shouldEnqueueCallback(key)) {
+                const cbPlanRef = await resolvePlanRefForCallback(task);
                 await this.taskQueueRepository.add({
                   sender_agent_id: agent.id,
                   receiver_agent_id: task.sender_agent_id,
@@ -644,14 +874,16 @@ export class AgentRunnerService implements OnModuleInit {
                   parent_task_callback: true,
                   callback_final: true,
                   callback_context: (task as any).callback_context ?? task.payload,
+                  plan_ref: cbPlanRef,
                   created_at: new Date(),
                 } as any);
-                this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_final_enqueued', taskId: task.id, workspaceId, eventData: { to: task.sender_agent_id, depth: cbDepth } }).catch(() => {});
+                this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_final_enqueued', taskId: task.id, workspaceId, eventData: { to: task.sender_agent_id, depth: cbDepth, plan_ref: cbPlanRef } }).catch(() => {});
               }
             } else {
               // delegated during this turn: send intermediate progress (wakes delegator) but not final
               const key = `${workspaceId}|${task.sender_agent_id}|${task.id}|delegation_progress|0|direct`;
               if (shouldEnqueueCallback(key)) {
+                const cbPlanRef = await resolvePlanRefForCallback(task);
                 await this.taskQueueRepository.add({
                   sender_agent_id: agent.id,
                   receiver_agent_id: task.sender_agent_id,
@@ -665,9 +897,10 @@ export class AgentRunnerService implements OnModuleInit {
                   parent_task_callback: true,
                   callback_final: false,
                   callback_context: (task as any).callback_context ?? task.payload,
+                  plan_ref: cbPlanRef,
                   created_at: new Date(),
                 } as any);
-                this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_progress_enqueued', taskId: task.id, workspaceId, eventData: { to: task.sender_agent_id, depth: cbDepth } }).catch(() => {});
+                this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_progress_enqueued', taskId: task.id, workspaceId, eventData: { to: task.sender_agent_id, depth: cbDepth, plan_ref: cbPlanRef } }).catch(() => {});
               }
             }
           }

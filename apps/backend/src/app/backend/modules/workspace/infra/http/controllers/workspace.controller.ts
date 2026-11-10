@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { IWorkspace } from '../../../domain/models/workspace.interface.js';
 import { IWorkspaceRepository, IWorkspaceRepositoryToken } from '../../../domain/repositories/workspace-repository.interface.js';
-import { DEFAULT_SYSTEM_PROMPT_ID } from '../../../../../core/infra/prompts/default-prompts.js';
+import { DEFAULT_SYSTEM_PROMPT_ID } from '../../../../../core/infra/prompts/prompt.constants.js';
 import { agentEventEmitter } from '../../../../agent-runner/agent-runner.service.js';
 import { AgentEntity } from '../../../../agent/infra/persistence/sequalize/entities/agent.schema.js';
 import { TaskQueueEntity } from '../../../../task-queue/infra/persistence/sequalize/entities/task-queue.schema.js';

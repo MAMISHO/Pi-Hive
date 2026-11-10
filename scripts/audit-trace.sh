@@ -58,7 +58,7 @@ echo "== Filters: ids=${IDS:-*} range=${RANGE:-*} since=${SINCE:-*} agent=${AGEN
 
 echo
 echo "## Tasks (tasks_queue)"
-sqlite3 -header -column "$DB" "SELECT t.id, IFNULL(sa.nickname,t.sender_agent_id) AS sender, IFNULL(ra.nickname,t.receiver_agent_id) AS receiver, t.status, IFNULL(t.task_flow,'direct') AS task_flow, IFNULL(t.callback_final,0) AS cb_final, t.parent_task_id, t.depth, IFNULL(t.depth_path,'') AS depth_path, substr(replace(IFNULL(t.payload,''),char(10),' '),1,$PAYLOAD_LEN) AS payload, substr(replace(IFNULL(t.response,''),char(10),' '),1,$RESP_LEN) AS response, datetime(t.created_at,'localtime') AS created_at FROM tasks_queue t LEFT JOIN agents sa ON sa.id=t.sender_agent_id LEFT JOIN agents ra ON ra.id=t.receiver_agent_id WHERE $TASK_WHERE ORDER BY t.id ASC LIMIT $LIMIT;"
+sqlite3 -header -column "$DB" "SELECT t.id, IFNULL(sa.nickname,t.sender_agent_id) AS sender, IFNULL(ra.nickname,t.receiver_agent_id) AS receiver, t.status, IFNULL(t.task_flow,'direct') AS task_flow, IFNULL(t.callback_final,0) AS cb_final, t.parent_task_id, IFNULL(t.plan_ref,'') AS plan_ref, t.depth, IFNULL(t.depth_path,'') AS depth_path, substr(replace(IFNULL(t.payload,''),char(10),' '),1,$PAYLOAD_LEN) AS payload, substr(replace(IFNULL(t.response,''),char(10),' '),1,$RESP_LEN) AS response, datetime(t.created_at,'localtime') AS created_at FROM tasks_queue t LEFT JOIN agents sa ON sa.id=t.sender_agent_id LEFT JOIN agents ra ON ra.id=t.receiver_agent_id WHERE $TASK_WHERE ORDER BY t.id ASC LIMIT $LIMIT;"
 
 if [[ $SHOW_EVENTS -eq 1 ]]; then
   echo
@@ -76,4 +76,8 @@ if [[ $SHOW_SUMMARY -eq 1 ]]; then
   echo
   echo "## Ping-pong candidates (A->B and B->A same flow in selection)"
   sqlite3 -header -column "$DB" "WITH s AS (SELECT IFNULL(sa.nickname,t.sender_agent_id) s, IFNULL(ra.nickname,t.receiver_agent_id) r, IFNULL(t.task_flow,'direct') f FROM tasks_queue t LEFT JOIN agents sa ON sa.id=t.sender_agent_id LEFT JOIN agents ra ON ra.id=t.receiver_agent_id WHERE $TASK_WHERE) SELECT a.s AS a, a.r AS b, a.f AS task_flow, COUNT(*) AS legs FROM s a JOIN s b ON a.s=b.r AND a.r=b.s AND a.f=b.f GROUP BY a.s,a.r,a.f;"
+  echo
+  echo "## Plans (delegation tracking)"
+  sqlite3 -header -column "$DB" "SELECT t.id, IFNULL(t.plan_ref,'') AS plan_ref, IFNULL(sa.nickname,t.sender_agent_id) AS sender, IFNULL(ra.nickname,t.receiver_agent_id) AS receiver, IFNULL(t.task_flow,'direct') AS task_flow, t.parent_task_id, t.depth, IFNULL(t.depth_path,'') AS depth_path, datetime(t.created_at,'localtime') AS created_at FROM tasks_queue t LEFT JOIN agents sa ON sa.id=t.sender_agent_id LEFT JOIN agents ra ON ra.id=t.receiver_agent_id WHERE $TASK_WHERE AND t.plan_ref IS NOT NULL ORDER BY t.plan_ref ASC, t.id ASC LIMIT $LIMIT;"
+  sqlite3 -header -column "$DB" "SELECT e.id, IFNULL(a.nickname,e.agent_id) AS agent, e.task_id, e.kind, substr(replace(IFNULL(e.content,''),char(10),' '),1,$CONTENT_LEN) AS content, datetime(e.created_at,'localtime') AS created_at FROM agent_chat_events e LEFT JOIN agents a ON a.id=e.agent_id WHERE e.kind='plan' AND (e.task_id IN (SELECT t.id FROM tasks_queue t LEFT JOIN agents sa ON sa.id=t.sender_agent_id LEFT JOIN agents ra ON ra.id=t.receiver_agent_id WHERE $TASK_WHERE) OR e.task_id IS NULL) ORDER BY e.id ASC LIMIT $LIMIT;"
 fi

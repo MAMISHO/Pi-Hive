@@ -15,4 +15,5 @@ export interface ITaskQueue {
   parent_task_callback?: boolean;    // true = this is a delegation callback (progress/result)
   callback_context?: string | null;  // accumulated instructions to continue
   callback_final?: boolean | null;   // true = final result closing the branch; false = progress/intermediate
+  plan_ref?: number | null;          // task id of the original request that owns the delegation tracking plan
 }

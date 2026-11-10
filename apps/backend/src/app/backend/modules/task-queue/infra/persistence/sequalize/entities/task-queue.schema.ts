@@ -83,6 +83,9 @@ export class TaskQueueEntity extends Model<ITaskQueue> {
   @Column({ type: DataType.BOOLEAN, allowNull: true, defaultValue: null })
   declare callback_final: boolean | null;
 
+  @Column({ type: DataType.INTEGER, allowNull: true })
+  declare plan_ref: number | null;
+
   @Column(DataType.DATE)
   declare created_at: Date;
 

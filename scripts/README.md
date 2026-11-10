@@ -25,8 +25,8 @@ scripts/audit-trace.sh --db data/pi-hive.db --no-summary
 ```
 
 **Salida:**
-- **Tasks**: id, sender/receiver (nickname), status, task_flow, cb_final, parent_task_id, depth, depth_path, payload/response (recortados), created_at.
+- **Tasks**: id, sender/receiver (nickname), status, task_flow, cb_final, parent_task_id, plan_ref, depth, depth_path, payload/response (recortados), created_at.
 - **Events** (`--events`): agent_chat_events de las tasks seleccionadas (direction/kind/content).
-- **Summary**: conteos por flow/cb_final; **candidatos a eco/duplicado** (misma tupla sender,receiver,flow,parent,cb_final repetida) y **candidatos a ping-pong** (A→B y B→A con mismo flow en la selección).
+- **Summary**: conteos por flow/cb_final; **candidatos a eco/duplicado** (misma tupla sender,receiver,flow,parent,cb_final repetida); **candidatos a ping-pong** (A→B y B→A con mismo flow en la selección); **Planes** (tasks con `plan_ref` y eventos `kind='plan'` de tracking de delegación).
 
-Los callbacks incluyen en el payload un encabezado de rastro (`state=FINAL|PROGRESS`, `task/request/origin/parent`, `depth`, `branch`) para distinguir resultados finales de informes intermedios y seguir la cadena origen→final.
+Los callbacks incluyen en el payload un encabezado de rastro (`state=FINAL|PROGRESS`, `task/request/origin/parent`, `depth`, `branch`) para distinguir resultados finales de informes intermedios y seguir la cadena origen→final. `branch/depth/path` son metadatos de cadena, no rutas de filesystem.

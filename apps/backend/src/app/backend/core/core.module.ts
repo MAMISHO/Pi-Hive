@@ -1,16 +1,9 @@
-import { Module } from '@nestjs/common';
+import { Global, Module } from '@nestjs/common';
+import { PromptsModule } from './infra/prompts/prompts.module.js';
 
-import { ConfigModule } from '@nestjs/config';
-
-import configuration from './config/configuration.js';
-
+@Global()
 @Module({
-  imports: [
-    ConfigModule.forRoot({
-      isGlobal: true,
-      load: [configuration],
-    }),
-  ],
-  exports: [ConfigModule],
+  imports: [PromptsModule],
+  exports: [PromptsModule],
 })
 export class CoreModule {}

@@ -8,7 +8,9 @@ import { WorkspaceSystemPromptEntity } from '../../../modules/system-prompts/inf
 import { AgentSessionHistoryEntity } from '../../../modules/session-history/infra/persistence/sequalize/entities/agent-session-history.schema.js';
 import { AgentChatEventEntity } from '../../../modules/chat-transcript/infra/persistence/sequalize/entities/agent-chat-event.schema.js';
 import { AgentRunLogEntity } from '../../../modules/agent-runner/infra/persistence/sequalize/entities/agent-run-log.schema.js';
-import { DEFAULT_SYSTEM_PROMPT_ID, DEFAULT_SYSTEM_PROMPT_NAME, DEFAULT_SYSTEM_PROMPT_CONTENT } from '../prompts/default-prompts.js';
+import { DelegationPlanEntity } from '../../../modules/agent-runner/infra/persistence/sequalize/entities/delegation-plan.schema.js';
+import { DEFAULT_SYSTEM_PROMPT_ID, DEFAULT_SYSTEM_PROMPT_NAME } from '../prompts/prompt.constants.js';
+import { FilePromptProvider } from '../prompts/provider/file-prompt.provider.js';
 
 const dbPath = process.env.DB_PATH ?? './data/pi-hive.db';
 
@@ -34,6 +36,7 @@ export const databaseProviders = [
           AgentSessionHistoryEntity,
           AgentChatEventEntity,
           AgentRunLogEntity,
+          DelegationPlanEntity,
         ]);
         await sequelize.sync();
         // sqlite sync() doesn't add new columns to existing tables; add missing columns
@@ -47,6 +50,7 @@ export const databaseProviders = [
             ['parent_task_callback', "ALTER TABLE tasks_queue ADD COLUMN parent_task_callback BOOLEAN DEFAULT 0;"],
             ['callback_context', "ALTER TABLE tasks_queue ADD COLUMN callback_context TEXT;"],
             ['callback_final', "ALTER TABLE tasks_queue ADD COLUMN callback_final BOOLEAN;"],
+            ['plan_ref', "ALTER TABLE tasks_queue ADD COLUMN plan_ref INTEGER;"],
           ];
           for (const [name, sql] of adds) {
             if (!names.has(name)) {
@@ -57,20 +61,27 @@ export const databaseProviders = [
         } catch (e) { console.warn('[DB] tasks_queue migrate:', (e as any)?.message || e); }
         console.log('Database synchronized (alter).');
 
-        // Seed immutable default system prompt (global)
-        const defaultPrompt = await WorkspaceSystemPromptEntity.findByPk(DEFAULT_SYSTEM_PROMPT_ID);
-        if (!defaultPrompt) {
-          await WorkspaceSystemPromptEntity.create({
-            id: DEFAULT_SYSTEM_PROMPT_ID,
-            workspace_id: null,
-            name: DEFAULT_SYSTEM_PROMPT_NAME,
-            content: DEFAULT_SYSTEM_PROMPT_CONTENT,
-            is_default: true,
-            created_at: new Date(),
-            updated_at: new Date(),
-          } as any);
-          console.log('Default system prompt seeded.');
-        }
+        // Seed/refresh immutable default system prompt (global) from catalog files
+        try {
+          const catalog = new FilePromptProvider();
+          const content = catalog.getSystemDefault();
+          const defaultPrompt = await WorkspaceSystemPromptEntity.findByPk(DEFAULT_SYSTEM_PROMPT_ID);
+          if (!defaultPrompt) {
+            await WorkspaceSystemPromptEntity.create({
+              id: DEFAULT_SYSTEM_PROMPT_ID,
+              workspace_id: null,
+              name: DEFAULT_SYSTEM_PROMPT_NAME,
+              content,
+              is_default: true,
+              created_at: new Date(),
+              updated_at: new Date(),
+            } as any);
+            console.log('Default system prompt seeded.');
+          } else if ((defaultPrompt as any).content !== content || (defaultPrompt as any).name !== DEFAULT_SYSTEM_PROMPT_NAME) {
+            await defaultPrompt.update({ content, name: DEFAULT_SYSTEM_PROMPT_NAME, updated_at: new Date() } as any);
+            console.log('Default system prompt refreshed from catalog.');
+          }
+        } catch (e) { console.warn('[DB] default prompt seed/refresh:', (e as any)?.message || e); }
 
         // Backfill: ensure workspaces have HITL default false / prompt binding null (alter handles columns)
         // Existing agents without workspace are left as-is (legacy); new flows require workspace.

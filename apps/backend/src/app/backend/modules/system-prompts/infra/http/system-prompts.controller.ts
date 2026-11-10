@@ -1,10 +1,13 @@
 import { Body, Controller, Delete, Get, Inject, Param, Post, Put } from '@nestjs/common';
 import { WorkspaceSystemPromptEntity } from '../persistence/sequalize/entities/workspace-system-prompt.schema.js';
-import { DEFAULT_SYSTEM_PROMPT_ID, DEFAULT_SYSTEM_PROMPT_CONTENT, DEFAULT_SYSTEM_PROMPT_NAME } from '../../../../core/infra/prompts/default-prompts.js';
+import { PromptCatalogService } from '../../../../core/infra/prompts/prompt-catalog.service.js';
 
 @Controller('workspaces/:workspaceId/system-prompts')
 export class SystemPromptsController {
-  constructor(@Inject('SYSTEM_PROMPT_MODEL') private model: typeof WorkspaceSystemPromptEntity) {}
+  constructor(
+    @Inject('SYSTEM_PROMPT_MODEL') private model: typeof WorkspaceSystemPromptEntity,
+    private readonly prompts: PromptCatalogService,
+  ) {}
 
   @Get()
   async list(@Param('workspaceId') workspaceId: string) {
@@ -20,7 +23,7 @@ export class SystemPromptsController {
       id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `sp-${Date.now()}`,
       workspace_id: workspaceId,
       name: body.name || 'Custom Prompt',
-      content: body.content ?? DEFAULT_SYSTEM_PROMPT_CONTENT,
+      content: body.content ?? this.prompts.systemDefaultContent,
       is_default: false,
       created_at: now,
       updated_at: now,

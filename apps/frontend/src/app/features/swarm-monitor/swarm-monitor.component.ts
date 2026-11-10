@@ -41,6 +41,7 @@ import { Subscription } from 'rxjs';
               <div class="chat-meta">
                 <span class="route">
                   @if (ev.kind === 'system_prompt') { <b>🧩 SYSTEM CONTEXT</b> }
+                  @else if (ev.kind === 'plan') { <b>🗺️ Plan</b> }
                   @else if (ev.kind === 'request') { <b>→ Request</b> }
                   @else if (ev.kind === 'response') { <b>← Response</b> }
                   @else if (ev.kind === 'thinking') { <b>🧠 Thinking</b> }
@@ -51,6 +52,11 @@ import { Subscription } from 'rxjs';
               </div>
               @if (ev.kind === 'system_prompt') {
                 <details class="sys-details"><summary title="Ver prompt del sistema completo">Prompt del sistema (inyectado en el punto de uso) — colapsado</summary><pre>{{ ev.content }}</pre></details>
+              } @else if (ev.kind === 'plan') {
+                <details class="collapsible-item" title="Ver tracking de delegación">
+                  <summary title="Ver tracking de delegación">🗺️ Delegation plan{{ planStepsLabel(ev.meta) }}</summary>
+                  <pre class="ev-body">{{ ev.content }}</pre>
+                </details>
               } @else if (ev.kind === 'thinking') {
                 <details class="collapsible-item" title="Ver pensamiento completo">
                   <summary title="Ver pensamiento completo">{{ thinkingSummary(ev.content) }}</summary>
@@ -88,7 +94,7 @@ import { Subscription } from 'rxjs';
             <div class="queue-meta" *ngIf="queueCurrentTaskId">En proceso: tarea #{{ queueCurrentTaskId }}</div>
             @for (it of queueItems; track (it.taskId ?? $index)) {
               <div class="queue-item">
-                <div class="qi-top"><b>#{{it.taskId ?? '—'}}</b> <span class="qi-flow">{{it.task_flow || 'direct'}}{{it.callback_final ? ' (final)' : ''}}</span> <span class="qi-who">de {{ requestorLabel(it.sender_agent_id) }}</span></div>
+                <div class="qi-top"><b>#{{it.taskId ?? '—'}}</b> <span class="qi-flow">{{it.task_flow || 'direct'}}{{it.callback_final ? ' (final)' : ''}}</span> @if (it.plan_ref) { <span class="qi-plan">plan #{{it.plan_ref}}</span> } <span class="qi-who">de {{ requestorLabel(it.sender_agent_id) }}</span></div>
                 <div class="qi-payload">{{ it.preview || it.payload || '' }}</div>
               </div>
             } @empty { <div class="queue-empty">{{ queueDepth>0 ? (queueDepth + ' en cola (detalle no disponible)') : 'Sin peticiones en cola' }}</div> }
@@ -150,7 +156,7 @@ import { Subscription } from 'rxjs';
     .queue-toggle { width:100%; display:flex; justify-content:space-between; align-items:center; padding:8px 10px; background:transparent; border:0; color:var(--text-primary); cursor:pointer; font-size:12px; }
     .q-left{display:flex; align-items:center; gap:6px;} .q-count{font-family:var(--font-mono); font-size:11px; padding:2px 8px; border-radius:999px; background:rgba(148,163,184,.15); color:var(--text-muted);}
     .q-count.has{background:rgba(245,158,11,.18); color:var(--accent-amber,#f59e0b);} .queue-list{padding:8px 10px; border-top:1px solid var(--border-color); display:flex; flex-direction:column; gap:6px; max-height:180px; overflow:auto;}
-    .queue-item{padding:6px 8px; border:1px solid var(--border-color); border-radius:6px; background:var(--bg-secondary);} .qi-top{display:flex; gap:8px; align-items:center; font-size:11px; color:var(--text-secondary);} .qi-flow{font-size:10px; color:var(--accent-blue);} .qi-who{margin-left:auto; font-size:10px; color:var(--text-muted);} .qi-payload{font-size:12px; color:var(--text-primary); margin-top:2px; white-space:pre-wrap;}
+    .queue-item{padding:6px 8px; border:1px solid var(--border-color); border-radius:6px; background:var(--bg-secondary);} .qi-top{display:flex; gap:8px; align-items:center; font-size:11px; color:var(--text-secondary);} .qi-flow{font-size:10px; color:var(--accent-blue);} .qi-plan{font-size:10px; color:var(--accent-green, #22c55e); border:1px solid var(--border-color); border-radius:999px; padding:0 6px;} .qi-who{margin-left:auto; font-size:10px; color:var(--text-muted);} .qi-payload{font-size:12px; color:var(--text-primary); margin-top:2px; white-space:pre-wrap;}
     .queue-empty,.queue-meta{font-size:11px; color:var(--text-muted);}
 
     /* Stop button with pulsing animation */
@@ -386,6 +392,14 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy {
   }
   toolGroupText(content: any): string {
     try { const j = typeof content === 'string' ? JSON.parse(content) : content; return Array.isArray(j) ? JSON.stringify(j, null, 2) : (content ? JSON.stringify(content, null, 2) : String(content)); } catch { return String(content); }
+  }
+
+  planStepsLabel(meta: any): string {
+    try {
+      const m = typeof meta === 'string' ? JSON.parse(meta) : meta;
+      const n = m?.steps;
+      return n != null ? ` (${n} paso${Number(n) === 1 ? '' : 's'})` : '';
+    } catch { return ''; }
   }
 
   ngOnDestroy(): void {

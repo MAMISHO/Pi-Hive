@@ -11,11 +11,13 @@ import { IdentityResolverService } from './identity-resolver.service.js';
 import { PromptBuilderService } from './prompt-builder.service.js';
 import { RunTraceService } from './run-trace.service.js';
 import { RunTraceController } from './run-trace.controller.js';
+import { DelegationPlannerService } from './delegation-planner.service.js';
+import { DelegationPlanStore } from './delegation-plan.store.js';
 
 @Module({
   imports: [forwardRef(() => AgentModule), TaskQueueModule, AgentMemoryModule, WorkspaceModule],
   controllers: [RunTraceController],
-  providers: [AgentRunnerService, AgentGateway, IdentityResolverService, PromptBuilderService, RunTraceService],
-  exports: [AgentRunnerService, AgentGateway, IdentityResolverService, PromptBuilderService, RunTraceService],
+  providers: [AgentRunnerService, AgentGateway, IdentityResolverService, PromptBuilderService, RunTraceService, DelegationPlannerService, DelegationPlanStore],
+  exports: [AgentRunnerService, AgentGateway, IdentityResolverService, PromptBuilderService, RunTraceService, DelegationPlannerService, DelegationPlanStore],
 })
 export class AgentRunnerModule {}
