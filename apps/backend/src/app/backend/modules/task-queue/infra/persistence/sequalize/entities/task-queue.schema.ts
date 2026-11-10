@@ -80,6 +80,9 @@ export class TaskQueueEntity extends Model<ITaskQueue> {
   @Column({ type: DataType.TEXT, allowNull: true })
   declare callback_context: string | null;
 
+  @Column({ type: DataType.BOOLEAN, allowNull: true, defaultValue: null })
+  declare callback_final: boolean | null;
+
   @Column(DataType.DATE)
   declare created_at: Date;
 

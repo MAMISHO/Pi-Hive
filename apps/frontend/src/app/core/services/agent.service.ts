@@ -14,6 +14,7 @@ export class AgentService {
   getById(id: string): Observable<IAgent> { return this.http.get<IAgent>(`${BASE_URL}/agents/${id}`); }
   create(agent: IAgent): Observable<IAgent> { return this.http.post<IAgent>(`${BASE_URL}/agents`, agent); }
   update(id: string, agent: Partial<IAgent>): Observable<IAgent> { return this.http.put<IAgent>(`${BASE_URL}/agents/${id}`, agent); }
+  edit(id: string, agent: Partial<IAgent>): Observable<IAgent> { return this.update(id, agent); }
   stop(id: string): Observable<any> { return this.http.put(`${BASE_URL}/agents/${id}/stop`, {}); }
   clearSession(id: string): Observable<any> { return this.http.put(`${BASE_URL}/agents/${id}/session/clear`, {}); }
   compactSession(id: string): Observable<any> { return this.http.put(`${BASE_URL}/agents/${id}/session/compact`, {}); }

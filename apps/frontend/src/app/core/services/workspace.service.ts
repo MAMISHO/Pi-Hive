@@ -25,5 +25,7 @@ export class WorkspaceService {
   update(id: string, body: Partial<IWorkspace>) { return this.http.put<IWorkspace>(`${BASE_URL}/workspaces/${id}`, body).pipe(tap(() => this.refreshActive())); }
   delete(id: string) { return this.http.delete(`${BASE_URL}/workspaces/${id}`).pipe(tap(() => this.refreshActive())); }
   resetSession(id: string) { return this.http.post(`${BASE_URL}/workspaces/${id}/session/reset`, {}); }
+  stopAll(id: string) { return this.http.post(`${BASE_URL}/workspaces/${id}/stop-all`, {}); }
+  clearAllSessions(id: string) { return this.http.post(`${BASE_URL}/workspaces/${id}/sessions/clear-all`, {}); }
   browseDirs(path?: string) { const params = path ? `?path=${encodeURIComponent(path)}` : ''; return this.http.get<any>(`${BASE_URL}/workspaces/browse/dirs${params}`); }
 }

@@ -21,8 +21,7 @@ import { DialogModule } from 'primeng/dialog';
       <div class="header">
         <h2>Agent Roster</h2>
         <div class="header-actions">
-          <button pButton type="button" icon="pi pi-cog" class="p-button-text p-button-sm" (click)="openManage()" title="Manage agents"></button>
-          <button pButton type="button" label="Create" icon="pi pi-plus" (click)="showCreateModal = true"></button>
+          <button pButton type="button" label="Create" icon="pi pi-plus" class="p-button-sm" (click)="openCreate()"></button>
         </div>
       </div>
       @if (chiefAgents.length) { <div class="section-label">Chief</div>
@@ -31,6 +30,10 @@ import { DialogModule } from 'primeng/dialog';
             <span class="status-dot" [class]="statusClass(agent.status)" [style.background]="statusBg(agent)"></span>
             <div class="agent-info"><div class="agent-name" [style.color]="agent.color||''">{{ agent.nickname }}</div><div class="agent-model">{{ modelOf(agent) }}</div></div>
             <span class="agent-role">CHIEF</span>
+            <div class="row-actions">
+              <button pButton type="button" icon="pi pi-pencil" class="p-button-text p-button-sm icon-btn" title="Editar agente" (click)="editAgent(agent, $event)"></button>
+              <button pButton type="button" icon="pi pi-trash" class="p-button-text p-button-sm icon-btn danger" title="Eliminar agente" [disabled]="isBusy(agent)" (click)="deleteAgent(agent, $event)"></button>
+            </div>
           </div>
         }
       }
@@ -39,35 +42,30 @@ import { DialogModule } from 'primeng/dialog';
         <div class="agent-card" [class.selected]="selectedId === agent.id" (click)="select(agent)">
           <span class="status-dot" [class]="statusClass(agent.status)" [style.background]="statusBg(agent)"></span>
           <div class="agent-info"><div class="agent-name" [style.color]="agent.color||''">{{ agent.nickname }}</div><div class="agent-model">{{ modelOf(agent) }}</div></div>
+          <div class="row-actions">
+            <button pButton type="button" icon="pi pi-pencil" class="p-button-text p-button-sm icon-btn" title="Editar agente" (click)="editAgent(agent, $event)"></button>
+            <button pButton type="button" icon="pi pi-trash" class="p-button-text p-button-sm icon-btn danger" title="Eliminar agente" [disabled]="isBusy(agent)" (click)="deleteAgent(agent, $event)"></button>
+          </div>
         </div>
       } @empty { <div class="empty">No worker agents yet</div> }
-      <app-create-agent-modal [(visible)]="showCreateModal" (created)="onAgentCreated($event)"></app-create-agent-modal>
-      <p-dialog header="Manage Agents" [(visible)]="showManageModal" [modal]="true" [style]="{width:'640px'}">
-        <div class="manage-list">
-          @for (a of allAgentsAdmin; track a.id) {
-            <div class="manage-row">
-              <div class="manage-info"><div class="manage-name" [style.color]="a.color||''">{{ a.nickname }} <span class="manage-id">({{ a.id }})</span></div><div class="manage-meta">workspace: {{ a.workspace_id || '—' }} · role: {{ a.role }}</div></div>
-              <button pButton type="button" label="Eliminar" icon="pi pi-trash" severity="danger" class="p-button-sm" (click)="deleteAgent(a)"></button>
-            </div>
-          }
-          @if (!allAgentsAdmin.length) { <div class="empty">No agents</div> }
-        </div>
-      </p-dialog>
+      <app-create-agent-modal [(visible)]="showCreateModal" [agent]="editingAgent" (created)="onAgentCreated($event)" (updated)="onAgentUpdated($event)"></app-create-agent-modal>
     </div>
   `,
   styles: [`
     .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.header h2{font-size:14px;font-weight:600;color:var(--text-primary)}
     .section-label{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin:14px 0 6px}
+    .agent-card{display:flex;align-items:center;gap:8px;padding:8px;border-radius:8px;cursor:pointer;border:1px solid transparent}
+    .agent-card:hover{background:rgba(255,255,255,0.03);border-color:var(--border-color)} .agent-card.selected{background:rgba(59,130,246,0.08);border-color:rgba(59,130,246,0.25)}
     .agent-info{display:flex;flex-direction:column;flex:1;min-width:0}.agent-model{font-size:10px;color:var(--text-muted);font-family:var(--font-mono)}
     .agent-role{font-size:9px;color:var(--accent-purple);font-weight:700}.empty{font-size:12px;color:var(--text-muted);padding:8px 0}
-    .manage-list{display:flex;flex-direction:column;gap:8px;max-height:400px;overflow-y:auto}
-    .manage-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;border:1px solid var(--border-color);border-radius:6px}
-    .manage-name{font-weight:600;font-size:13px}.manage-id{font-weight:400;font-size:11px;color:var(--text-muted)}.manage-meta{font-size:11px;color:var(--text-muted)}
+    .row-actions{display:flex;gap:2px;margin-left:auto}
+    .icon-btn{width:28px;height:28px;padding:0}
+    .icon-btn.danger{color:var(--accent-red,#ef4444)}
   `],
 })
 export class SidebarLeftComponent implements OnInit, OnDestroy {
-  chiefAgents: IAgent[] = []; workers: IAgent[] = []; agents: IAgent[] = []; allAgentsAdmin: IAgent[] = [];
-  selectedId: string | null = null; showCreateModal = false; showManageModal = false; subs: Subscription[] = []; private _lastWsId: string|null=null;
+  chiefAgents: IAgent[] = []; workers: IAgent[] = []; agents: IAgent[] = [];
+  selectedId: string | null = null; showCreateModal = false; editingAgent: IAgent | null = null; subs: Subscription[] = []; private _lastWsId: string|null=null;
   constructor(private readonly agentService: AgentService, private readonly ws: WebsocketService, private readonly selection: AgentSelectionService, private readonly workspace: WorkspaceService) {}
   ngOnInit(): void {
     this.loadAgents();
@@ -89,8 +87,20 @@ export class SidebarLeftComponent implements OnInit, OnDestroy {
   statusBg(agent: IAgent): string { return agent.status === 'WORKING' ? (agent.color || '#3b82f6') : ''; }
   modelOf(agent: IAgent): string { const ts = agent.task_state as any; return ts?.model ? String(ts.model).split('/').pop() : agent.name; }
   select(agent: IAgent): void { this.selection.select(agent); }
-  onAgentCreated(agent: IAgent): void { this.agents = [...this.agents, agent]; this.split(); }
-  openManage(): void { this.showManageModal = true; this.agentService.adminList().subscribe((list) => (this.allAgentsAdmin = list)); }
-  deleteAgent(agent: IAgent): void { if (!confirm(`¿Eliminar/desactivar al agente "${agent.nickname}" (${agent.id})?`)) return; this.agentService.deactivate(agent.id).subscribe(() => { this.allAgentsAdmin = this.allAgentsAdmin.filter((a) => a.id !== agent.id); this.loadAgents(); if (this.selection.selectedAgent?.id === agent.id) this.selection.select(null as any); }); }
+  isBusy(agent: IAgent): boolean { return (agent.status as any) === 'WORKING'; }
+  openCreate(): void { this.editingAgent = null; this.showCreateModal = true; }
+  editAgent(agent: IAgent, ev?: Event): void { ev?.stopPropagation(); this.editingAgent = { ...agent }; this.showCreateModal = true; }
+  onAgentCreated(agent: IAgent): void { this.agents = [...this.agents, agent]; this.split(); this.editingAgent = null; }
+  onAgentUpdated(agent: IAgent): void { this.agents = this.agents.map(a => a.id === agent.id ? { ...a, ...agent } : a); this.split(); if (this.selection.selectedAgent?.id === agent.id) this.selection.select(this.agents.find(a=>a.id===agent.id) as any); this.editingAgent = null; this.loadAgents(); }
+  deleteAgent(agent: IAgent, ev?: Event): void {
+    ev?.stopPropagation();
+    if (this.isBusy(agent)) return;
+    if (!confirm(`¿Eliminar al agente "${agent.nickname}"? Esta acción no se puede deshacer.`)) return;
+    this.agentService.deactivate(agent.id).subscribe(() => {
+      this.agents = this.agents.filter((a) => a.id !== agent.id); this.split();
+      if (this.selection.selectedAgent?.id === agent.id) this.selection.select(this.agents[0] || null as any);
+      this.loadAgents();
+    });
+  }
   ngOnDestroy(): void { this.subs.forEach((s) => s.unsubscribe()); }
 }

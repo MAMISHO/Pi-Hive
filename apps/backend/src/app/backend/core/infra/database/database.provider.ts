@@ -46,6 +46,7 @@ export const databaseProviders = [
             ['depth_path', "ALTER TABLE tasks_queue ADD COLUMN depth_path VARCHAR(255);"],
             ['parent_task_callback', "ALTER TABLE tasks_queue ADD COLUMN parent_task_callback BOOLEAN DEFAULT 0;"],
             ['callback_context', "ALTER TABLE tasks_queue ADD COLUMN callback_context TEXT;"],
+            ['callback_final', "ALTER TABLE tasks_queue ADD COLUMN callback_final BOOLEAN;"],
           ];
           for (const [name, sql] of adds) {
             if (!names.has(name)) {

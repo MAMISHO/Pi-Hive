@@ -27,9 +27,7 @@ import { Subscription } from 'rxjs';
           <span class="status-text">{{ statusLabel(selectedAgent.status) }}</span>
           @if (queueDepth > 0) { <span class="queue-badge">{{ queueDepth }} in queue</span> }
           @if (runStateMsg) { <span class="run-msg">{{ runStateMsg }}</span> }
-          @if (selectedAgent?.status === 'WORKING' || hasActiveWork()) {
-            <button pButton label="Parar" icon="pi pi-stop" severity="danger" class="p-button-sm p-button-outlined" (click)="stopAgent()"></button>
-          }
+
         </div>
       }
       <app-live-console [selectedAgentId]="selectedAgentId"></app-live-console>
@@ -44,23 +42,33 @@ import { Subscription } from 'rxjs';
             <div class="chat-item" [class.system-ev]="ev.kind === 'system_prompt'" [class.inbound]="ev.direction==='INBOUND'" [class.outbound]="ev.direction==='OUTBOUND'">
               <div class="chat-meta">
                 <span class="route">
-                  @if (ev.kind === 'system_prompt') { <b>🧩 SYSTEM CONTEXT (inyectado por Pi-Hive)</b> }
+                  @if (ev.kind === 'system_prompt') { <b>🧩 SYSTEM CONTEXT</b> }
                   @else if (ev.kind === 'request') { <b>→ Request</b> }
                   @else if (ev.kind === 'response') { <b>← Response</b> }
-                  @else if (ev.kind === 'thinking') { <b>💭 Thinking</b> }
+                  @else if (ev.kind === 'thinking') { <b>🧠 Thinking</b> }
                   @else if (ev.kind === 'tool_call') { <b>🔧 Tool</b> }
                   @else { <b>{{ ev.kind }}</b> }
                 </span>
                 <span class="ts" *ngIf="ev.created_at">{{ ev.created_at | date:'HH:mm:ss' }}</span>
               </div>
               @if (ev.kind === 'system_prompt') {
-                <details open class="sys-details"><summary>Prompt del sistema + identidad (contexto multiagente) — inyectado internamente</summary><pre>{{ ev.content }}</pre></details>
+                <details class="sys-details"><summary>Prompt del sistema (inyectado en el punto de uso) — colapsado</summary><pre>{{ ev.content }}</pre></details>
+              } @else if (ev.kind === 'thinking') {
+                <details class="collapsible-item">
+                  <summary>🧠 {{ thinkingSummary(ev.content) }}</summary>
+                  <pre class="ev-body">{{ thinkingText(ev.content) }}</pre>
+                </details>
+              } @else if (ev.kind === 'tool_call') {
+                <details class="collapsible-item">
+                  <summary>🔧 {{ toolSummary(ev.content) }}</summary>
+                  <pre class="ev-body">{{ toolText(ev.content) }}</pre>
+                </details>
               } @else {
                 <pre class="ev-body">{{ ev.content }}</pre>
               }
             </div>
           } @empty {
-            <p class="empty">No messages yet (el prompt del sistema se mostrará al iniciar/limpiar sesión)</p>
+            <p class="empty">No messages yet (el prompt del sistema aparecerá colapsado en el punto de uso)</p>
           }
         </div>
       </section>
@@ -71,6 +79,21 @@ import { Subscription } from 'rxjs';
           @if (hitlEnabled && holdTask) { <span class="badge hold">HOLD</span> } @else if (hitlEnabled) { <span class="badge" style="color:var(--accent-amber)">HITL enabled</span> }
           @else if (selectedAgentId) { <span class="badge compose">COMPOSE</span> }
         </div>
+        <div class="queue-accordion" *ngIf="selectedAgentId">
+          <button type="button" class="queue-toggle" (click)="queueOpen = !queueOpen">
+            <span class="q-left"><i class="pi" [class.pi-chevron-right]="!queueOpen" [class.pi-chevron-down]="queueOpen"></i> Cola de peticiones</span>
+            <span class="q-count" [class.has]="queueDepth>0">{{ queueDepth }}</span>
+          </button>
+          <div class="queue-list" *ngIf="queueOpen">
+            <div class="queue-meta" *ngIf="queueCurrentTaskId">En proceso: tarea #{{ queueCurrentTaskId }}</div>
+            @for (it of queueItems; track (it.taskId ?? $index)) {
+              <div class="queue-item">
+                <div class="qi-top"><b>#{{it.taskId ?? '—'}}</b> <span class="qi-flow">{{it.taskFlow || 'direct'}}{{it.callbackFinal ? ' (final)' : ''}}</span> <span class="qi-who">de {{ requestorLabel(it.senderId) }}</span></div>
+                <div class="qi-payload">{{ it.payloadPreview || it.payload || '' }}</div>
+              </div>
+            } @empty { <div class="queue-empty">{{ queueDepth>0 ? (queueDepth + ' en cola (detalle no disponible)') : 'Sin peticiones en cola' }}</div> }
+          </div>
+        </div>
         <div class="prompt-wrap">
           <textarea pTextarea [ngModel]="promptText" (ngModelChange)="onPromptInput($event)" [disabled]="!holdTask && !selectedAgentId" rows="5"
             [placeholder]="holdTask ? 'Edit prompt and release…' : (selectedAgentId ? 'Escribe una tarea o /clear /compact /resume /stop /help' : 'Select an agent first')"></textarea>
@@ -80,6 +103,9 @@ import { Subscription } from 'rxjs';
         </div>
         <pre class="sysmsg" *ngIf="systemMsg">{{systemMsg}}</pre>
         <div class="actions">
+          @if (selectedAgent?.status === 'WORKING' || hasActiveWork()) {
+            <button pButton label="Parar" icon="pi pi-stop" severity="danger" class="p-button-outlined" (click)="stopAgent()"></button>
+          }
           @if (holdTask) {
             <button pButton label="Liberar y Ejecutar" icon="pi pi-play" (click)="liberar()"></button>
           } @else {
@@ -118,6 +144,14 @@ import { Subscription } from 'rxjs';
     .cmd-ac { position:absolute; left:0; right:0; bottom:100%; background: var(--bg-secondary); border:1px solid var(--border-color); border-radius:6px; margin-bottom:4px; z-index:5; }
     .cmd-item { padding:6px 8px; cursor:pointer; display:flex; gap:8px; font-size:12px; }
     .cmd-item:hover { background: rgba(255,255,255,0.04); }
+
+    .collapsible-item summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); }
+    .queue-accordion { border:1px solid var(--border-color); border-radius:8px; margin-bottom:8px; overflow:hidden; background: var(--bg-tertiary,#0f172a); }
+    .queue-toggle { width:100%; display:flex; justify-content:space-between; align-items:center; padding:8px 10px; background:transparent; border:0; color:var(--text-primary); cursor:pointer; font-size:12px; }
+    .q-left{display:flex; align-items:center; gap:6px;} .q-count{font-family:var(--font-mono); font-size:11px; padding:2px 8px; border-radius:999px; background:rgba(148,163,184,.15); color:var(--text-muted);}
+    .q-count.has{background:rgba(245,158,11,.18); color:var(--accent-amber,#f59e0b);} .queue-list{padding:8px 10px; border-top:1px solid var(--border-color); display:flex; flex-direction:column; gap:6px; max-height:180px; overflow:auto;}
+    .queue-item{padding:6px 8px; border:1px solid var(--border-color); border-radius:6px; background:var(--bg-secondary);} .qi-top{display:flex; gap:8px; align-items:center; font-size:11px; color:var(--text-secondary);} .qi-flow{font-size:10px; color:var(--accent-blue);} .qi-who{margin-left:auto; font-size:10px; color:var(--text-muted);} .qi-payload{font-size:12px; color:var(--text-primary); margin-top:2px; white-space:pre-wrap;}
+    .queue-empty,.queue-meta{font-size:11px; color:var(--text-muted);} .actions{display:flex; gap:8px; align-items:center;}
   `],
 })
 export class SwarmMonitorComponent implements OnInit, OnDestroy {
@@ -139,6 +173,10 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy {
   holdTask: ITaskQueue | null = null;
   hitlEnabled = false;
   queueDepth = 0;
+  queueItems: any[] = [];
+  queueCurrentTaskId: number | null = null;
+  queueOpen = false;
+  allAgents: any[] = [];
   runStateMsg = '';
   private subs: Subscription[] = [];
   private pendingLoad: any = null;
@@ -177,9 +215,12 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy {
     this.subs.push(this.ws.queueUpdated$.subscribe((e: any) => {
       if (e?.agentId === this.selectedAgentId) {
         this.queueDepth = e.pendingCount || 0;
+        this.queueItems = e.items || [];
+        this.queueCurrentTaskId = e.currentTaskId ?? null;
         if (this.selectedAgent && this.queueDepth > 0) this.selectedAgent = { ...this.selectedAgent, status: 'WORKING' };
       }
     }));
+    this.agentService.getAllAdmin().subscribe({ next: (list)=> this.allAgents = list || [], error: ()=> this.agentService.getAll().subscribe({next:(l)=>this.allAgents=l||[], error:()=>{}}) });
 
     this.subs.push(this.ws.runEvent$.subscribe((e: any) => {
       if (e?.agentId !== this.selectedAgentId) return;
@@ -316,6 +357,18 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy {
     if (!this.selectedAgentId) return;
     this.agentService.stop(this.selectedAgentId).subscribe({ next: () => this.scheduleBaseline(150), error: () => {} });
   }
+
+
+  requestorLabel(id: string): string {
+    if (!id) return '—'; if (id === 'user') return 'user';
+    const a = (this.allAgents || []).find(x => x.id === id);
+    return a ? (a.nickname || a.name || id) : id;
+  }
+  private tryParse(v: any): any { if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch { return null; } }
+  thinkingSummary(c: any): string { const o = this.tryParse(c); if (o?.summary) return String(o.summary) + (String(o.text||'').length>80?'…':''); const t = o?.text || String(c||''); return (t.replace(/\s+/g,' ').trim().slice(0,80) || 'Thinking') + (t.length>80?'…':''); }
+  thinkingText(c: any): string { const o = this.tryParse(c); return o?.text || String(c||''); }
+  toolSummary(c: any): string { const o = this.tryParse(c); if (o?.toolName) return `${o.toolName} (${o.phase||'call'})`; const t = String(c||''); try { const j = JSON.parse(t); if(j.tool||j.toolName) return `${j.tool||j.toolName}`; } catch {} return t.replace(/\s+/g,' ').trim().slice(0,80) || 'Tool call'; }
+  toolText(c: any): string { const o = this.tryParse(c); return o ? JSON.stringify(o, null, 2) : String(c||''); }
 
   ngOnDestroy(): void {
     if (this.selectedAgentId) this.drafts.set(this.selectedAgentId, this.promptText);

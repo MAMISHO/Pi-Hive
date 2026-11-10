@@ -69,6 +69,31 @@ export class WorkspaceController {
     return { ok: true, agents: agents.length };
   }
 
+  @Post(':id/stop-all')
+  async stopAll(@Param('id') id: string): Promise<any> {
+    agentEventEmitter.emit('workspace:stop-all', { workspaceId: id });
+    const agents = await AgentEntity.findAll({ where: { workspace_id: id } as any });
+    let stopped = 0;
+    for (const a of agents) {
+      const st = String(a.get('status') || '');
+      if (st === 'WORKING') { agentEventEmitter.emit('agent:stop', { agentId: a.get('id'), reason: 'workspace_stop_all', notifySender: false }); stopped++; }
+    }
+    return { ok: true, stopped, agents: agents.length };
+  }
+
+  @Post(':id/sessions/clear-all')
+  async clearAll(@Param('id') id: string): Promise<any> {
+    const agents = await AgentEntity.findAll({ where: { workspace_id: id } as any });
+    const busy = (agents as any[]).filter(a => String(a.get('status') || '') === 'WORKING').map(a => a.get('nickname') || a.get('id'));
+    if (busy.length) return { ok: false, busy, cleared: 0 };
+    const sorted = [...agents].sort((a: any, b: any) => (a.get('role') === 'CHIEF' ? 0 : 1) - (b.get('role') === 'CHIEF' ? 0 : 1) || String(a.get('nickname')||a.get('id')).localeCompare(String(b.get('nickname')||b.get('id'))));
+    for (const a of sorted) {
+      agentEventEmitter.emit('agent:session:clear', a.get('id'));
+      await AgentSessionHistoryEntity.create({ workspace_id: id, agent_id: a.get('id'), session_id: a.get('current_session_id'), event_type: 'WORKSPACE_RESET', summary: 'Workspace clear-all sessions', details: null, created_at: new Date() } as any).catch(()=>{});
+    }
+    return { ok: true, cleared: sorted.length };
+  }
+
   @Delete(':id')
   async remove(@Param('id') id: string): Promise<{ ok: boolean }> {
     await TaskQueueEntity.destroy({ where: { workspace_id: id } as any }).catch(()=>{});

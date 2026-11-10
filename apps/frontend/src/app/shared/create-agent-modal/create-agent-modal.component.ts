@@ -12,9 +12,9 @@ import { IAgent } from '../../core/models/agent.model';
   standalone: true,
   imports: [CommonModule, FormsModule, DialogModule, ButtonModule],
   template: `
-    <p-dialog header="Create Agent" [(visible)]="visible" [modal]="true" [style]="{width:'460px'}" (onHide)="onHide()">
+    <p-dialog [header]="isEdit ? 'Edit Agent' : 'Create Agent'" [(visible)]="visible" [modal]="true" [style]="{width:'460px'}" (onHide)="onHide()">
       <div class="form">
-        <div class="warn" *ngIf="!activeWs">Abre un workspace antes de crear agentes (no hive sin workspace).</div>
+        <div class="warn" *ngIf="!activeWs && !isEdit">Abre un workspace antes de crear agentes (no hive sin workspace).</div>
         <div class="field"><label>Nickname</label><input [(ngModel)]="nickname" placeholder="e.g. Bob" /></div>
         <div class="field"><label>Role</label>
           <select [(ngModel)]="role"><option value="WORKER">WORKER</option><option value="CHIEF">CHIEF</option></select>
@@ -43,7 +43,7 @@ import { IAgent } from '../../core/models/agent.model';
       </div>
       <ng-template pTemplate="footer">
         <button pButton label="Cancel" (click)="onHide()" class="p-button-text"></button>
-        <button pButton label="Create" icon="pi pi-check" (click)="submit()" [disabled]="!nickname || !selectedProvider || !selectedModelId || !activeWs"></button>
+        <button pButton [label]="isEdit ? 'Save' : 'Create'" icon="pi pi-check" (click)="submit()" [disabled]="!nickname || !selectedProvider || !selectedModelId || (!activeWs && !isEdit)"></button>
       </ng-template>
     </p-dialog>
   `,
@@ -59,10 +59,27 @@ import { IAgent } from '../../core/models/agent.model';
 })
 export class CreateAgentModalComponent implements OnInit {
   private _visible = false;
-  @Input() set visible(v: boolean) { this._visible = v; if (v) { this.color = this.randColor(); this.error = ''; } }
+  private _agent: IAgent | null = null;
+  @Input() set visible(v: boolean) { this._visible = v; if (v) { this.error = ''; if (!this._agent) this.color = this.randColor(); } }
   get visible() { return this._visible; }
+  @Input() set agent(a: IAgent | null) {
+    this._agent = a;
+    if (a) {
+      this.nickname = a.nickname || a.name || '';
+      this.role = (a.role as any) || 'WORKER';
+      const m = String((a.task_state as any)?.model || '');
+      if (m.includes('/')) { this.selectedProvider = m.split('/')[0]; this.selectedModelId = m.split('/').slice(1).join('/'); }
+      this.color = a.color || this.randColor();
+      this.instruction = (a as any).additional_instruction || '';
+    } else {
+      this.nickname = ''; this.role = 'WORKER'; this.selectedProvider = ''; this.selectedModelId = ''; this.color = this.randColor(); this.instruction = '';
+    }
+  }
+  get agent(): IAgent | null { return this._agent; }
   @Output() visibleChange = new EventEmitter<boolean>();
   @Output() created = new EventEmitter<IAgent>();
+  @Output() updated = new EventEmitter<IAgent>();
+  get isEdit(): boolean { return !!this._agent?.id; }
 
   nickname = ''; role: 'CHIEF' | 'WORKER' = 'WORKER';
   modelProviders: ModelProvider[] = []; selectedProvider = ''; selectedModelId = '';
@@ -84,13 +101,26 @@ export class CreateAgentModalComponent implements OnInit {
   onHide(): void { this.visible = false; this.visibleChange.emit(false); this.error=''; }
   submit(): void {
     this.error='';
-    if(!this.activeWs) { this.error='No hay workspace activo'; return; }
+    if(!this.isEdit && !this.activeWs) { this.error='No hay workspace activo'; return; }
     if(!this.selectedProvider||!this.selectedModelId){ this.error='Proveedor y modelo son obligatorios'; return; }
+    if (this.isEdit && this._agent) {
+      const patch: any = {
+        ...this._agent,
+        name: this.nickname, nickname: this.nickname, role: this.role,
+        task_state: { ...(this._agent.task_state || {}), model: `${this.selectedProvider}/${this.selectedModelId}` },
+        color: this.color, additional_instruction: this.instruction || null,
+      };
+      this.agentService.update(this._agent.id, patch).subscribe({
+        next: (saved) => { this.updated.emit(saved || patch); this.onHide(); },
+        error: (e) => { this.error = e?.error?.message || e?.message || 'Error guardando agente'; },
+      });
+      return;
+    }
     const agent: IAgent = {
       id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `agent-${Date.now()}`,
       name: this.nickname, nickname: this.nickname, role: this.role, status: 'IDLE',
       current_session_id: null, task_state: { model: `${this.selectedProvider}/${this.selectedModelId}` },
-      workspace_id: this.activeWs.id, color: this.color, additional_instruction: this.instruction || null,
+      workspace_id: this.activeWs!.id, color: this.color, additional_instruction: this.instruction || null,
     };
     this.agentService.create(agent).subscribe({
       next: (created) => { this.created.emit(created); this.onHide(); this.nickname=''; this.color=this.randColor(); this.instruction=''; },
