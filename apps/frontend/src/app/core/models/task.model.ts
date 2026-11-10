@@ -10,4 +10,9 @@ export interface ITaskQueue {
   response?: string | null;
   workspace_id?: string;
   created_at?: string | Date;
+  task_flow?: string | null;          // 'direct' | 'delegation_result'
+  depth?: number;
+  depth_path?: string | null;
+  parent_task_callback?: boolean;
+  callback_context?: string | null;
 }

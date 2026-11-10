@@ -9,10 +9,13 @@ import { AgentRunnerService } from './agent-runner.service.js';
 import { AgentGateway } from './agent.gateway.js';
 import { IdentityResolverService } from './identity-resolver.service.js';
 import { PromptBuilderService } from './prompt-builder.service.js';
+import { RunTraceService } from './run-trace.service.js';
+import { RunTraceController } from './run-trace.controller.js';
 
 @Module({
   imports: [forwardRef(() => AgentModule), TaskQueueModule, AgentMemoryModule, WorkspaceModule],
-  providers: [AgentRunnerService, AgentGateway, IdentityResolverService, PromptBuilderService],
-  exports: [AgentRunnerService, AgentGateway, IdentityResolverService, PromptBuilderService],
+  controllers: [RunTraceController],
+  providers: [AgentRunnerService, AgentGateway, IdentityResolverService, PromptBuilderService, RunTraceService],
+  exports: [AgentRunnerService, AgentGateway, IdentityResolverService, PromptBuilderService, RunTraceService],
 })
 export class AgentRunnerModule {}

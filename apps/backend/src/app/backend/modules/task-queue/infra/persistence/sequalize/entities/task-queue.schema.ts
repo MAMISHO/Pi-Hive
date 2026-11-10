@@ -65,6 +65,21 @@ export class TaskQueueEntity extends Model<ITaskQueue> {
   @Column({ type: DataType.STRING, allowNull: true })
   workspace_id: string | null;
 
+  @Column({ type: DataType.STRING, allowNull: true, defaultValue: 'direct' })
+  declare task_flow: string | null;
+
+  @Column({ type: DataType.INTEGER, defaultValue: 0 })
+  declare depth: number;
+
+  @Column({ type: DataType.STRING, allowNull: true })
+  declare depth_path: string | null;
+
+  @Column({ type: DataType.BOOLEAN, defaultValue: false })
+  declare parent_task_callback: boolean;
+
+  @Column({ type: DataType.TEXT, allowNull: true })
+  declare callback_context: string | null;
+
   @Column(DataType.DATE)
   declare created_at: Date;
 

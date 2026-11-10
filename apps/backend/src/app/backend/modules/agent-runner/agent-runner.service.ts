@@ -15,6 +15,7 @@ import { IAgentMemoryRepository, IAgentMemoryRepositoryToken } from '../agent-me
 import { IWorkspaceRepository, IWorkspaceRepositoryToken } from '../workspace/domain/repositories/workspace-repository.interface.js';
 import { IdentityResolverService } from './identity-resolver.service.js';
 import { PromptBuilderService } from './prompt-builder.service.js';
+import { RunTraceService } from './run-trace.service.js';
 import { taskEventEmitter } from '../task-queue/infra/persistence/sequalize/entities/task-queue.schema.js';
 import { AgentStatus } from '../agent/domain/models/agent-status.enum.js';
 import { AgentSessionHistoryEntity } from '../session-history/infra/persistence/sequalize/entities/agent-session-history.schema.js';
@@ -38,6 +39,7 @@ export class AgentRunnerService implements OnModuleInit {
     @Inject(IWorkspaceRepositoryToken) private workspaceRepository: IWorkspaceRepository,
     @Inject(IdentityResolverService) private identityResolverService: IdentityResolverService,
     @Inject(PromptBuilderService) private promptBuilder: PromptBuilderService,
+    @Inject(RunTraceService) private trace: RunTraceService,
   ) {
     console.log('[AgentRunner] constructed');
   }
@@ -151,14 +153,16 @@ export class AgentRunnerService implements OnModuleInit {
   }
 
   private async handlePendingTask(task: ITaskQueue): Promise<void> {
-    console.log(`[AgentRunner] handlePending id=${task.id} receiver=${task.receiver_agent_id} status=${task.status}`);
+    console.log(`[AgentRunner] handlePending id=${task.id} receiver=${task.receiver_agent_id} status=${task.status} flow=${(task as any).task_flow} depth=${(task as any).depth ?? 0}`);
     if (task.status !== 'PENDING') return;
     const agentId = task.receiver_agent_id;
     const workspaceId = (task as any).workspace_id;
     if (this.processingAgents.has(agentId)) {
       const q = this.pendingByAgent.get(agentId) || [];
       if (!q.find((t) => t.id === task.id)) {
-        q.push(task);
+        // callback-first priority: delegation results go to the front, others FIFO
+        if ((task as any).task_flow === 'delegation_result') q.unshift(task);
+        else q.push(task);
         this.pendingByAgent.set(agentId, q);
       }
       this.emitQueueState(agentId, workspaceId);
@@ -170,6 +174,8 @@ export class AgentRunnerService implements OnModuleInit {
     } finally {
       this.processingAgents.delete(agentId);
       const q = this.pendingByAgent.get(agentId) || [];
+      // dispatch callback-first
+      q.sort((a: any, b: any) => (a.task_flow === 'delegation_result' ? 0 : 1) - (b.task_flow === 'delegation_result' ? 0 : 1));
       const next = q.shift();
       this.pendingByAgent.set(agentId, q);
       this.emitQueueState(agentId, workspaceId);
@@ -231,6 +237,7 @@ export class AgentRunnerService implements OnModuleInit {
 
     let stopped = false;
     let runId = randomUUID();
+    const startedAt = Date.now();
     let finalized = false;
     const finalizeOnce = async (fn: () => Promise<void>) => { if (finalized) return; finalized = true; await fn(); };
     try {
@@ -242,18 +249,22 @@ export class AgentRunnerService implements OnModuleInit {
       const identityResolverService = this.identityResolverService;
       const currentTaskId = task.id;
       const senderAgentId = agent.id;
+      const parentDepth = Number((task as any).depth ?? 0);
+      const parentDepthPath = String((task as any).depth_path || `/root/${agent.nickname}`);
 
+      let delegatedThisRun = false;
       const delegateTaskTool = defineTool({
         name: 'delegate_task',
         label: 'Delegate Task',
-        description: 'Delegate a task to another agent by nickname',
+        description: 'Delega una tarea a otro agente por nickname EXACTO (solo el alias, p.ej. "Bob"; NO uses "Bob (WORKER)"). Asíncrono: NO esperes/pollees; termina tu turno y el resultado llegará como [DELEGATION RESULT]. En "instruction" pasa el PLAN COMPLETO para el agente (sub-objetivos, qué debe hacer con su resultado y a quién devolverlo).',
         parameters: Type.Object({
-          target_agent_nickname: Type.String({ description: 'Nickname of the target agent' }),
-          instruction: Type.String({ description: 'Instruction for the target agent' }),
+          target_agent_nickname: Type.String({ description: 'Nickname EXACTO del agente destino (solo alias, ej. "Pam"; sin sufijo de rol)' }),
+          instruction: Type.String({ description: 'Instrucción/plan completo para el agente destino' }),
         }),
         async execute(_toolCallId, params) {
           const target = await identityResolverService.resolveNickname(params.target_agent_nickname, workspaceId);
-          if (!target) return { content: [{ type: 'text' as const, text: `Agent not found: ${params.target_agent_nickname}` }], details: { taskId: 0 } };
+          if (!target) return { content: [{ type: 'text' as const, text: `Agent not found: "${params.target_agent_nickname}". Usa el nickname EXACTO (solo alias, ej. "Bob") de [EQUIPO].` }], details: { taskId: 0 } };
+          const nextDepth = Math.min(parentDepth + 1, 10);
           const newTask = await taskQueueRepository.add({
             sender_agent_id: senderAgentId,
             receiver_agent_id: target.id,
@@ -261,9 +272,15 @@ export class AgentRunnerService implements OnModuleInit {
             status: 'PENDING' as any,
             parent_task_id: currentTaskId,
             workspace_id: workspaceId,
+            task_flow: 'direct',
+            depth: nextDepth,
+            depth_path: `${parentDepthPath}/${target.nickname}`,
+            parent_task_callback: false,
+            callback_context: task.payload, // original instruction so the delegator can resume
             created_at: new Date(),
           } as any);
-          return { content: [{ type: 'text' as const, text: `Delegated task ${newTask.id} to ${target.nickname}` }], details: { taskId: Number(newTask.id) } };
+          delegatedThisRun = true;
+          return { content: [{ type: 'text' as const, text: `Delegated task ${newTask.id} to ${target.nickname} (depth ${nextDepth}). Recibirás un [DELEGATION RESULT] — NO esperes/pollees; completa tu turno y continúa cuando llegue.` }], details: { taskId: Number(newTask.id) } };
         },
       });
 
@@ -277,6 +294,8 @@ export class AgentRunnerService implements OnModuleInit {
         (task as any).response = `⚠️ Modelo no resuelto: ${r.reason}. Configura task_state.model (provider/modelId), p.ej. ollama/ornith-1.5:9b-16k-pi.`;
         await this.taskQueueRepository.update(task);
         await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', (task as any).response, groupId).catch(() => {});
+        this.trace.modelNotFound(runId, agent.id, workspaceId, task.id, r.reason).catch(() => {});
+        this.trace.close(runId, agent.id, workspaceId, task.id, 'model_not_found', r.reason, Date.now() - startedAt, false).catch(() => {});
         agent.status = AgentStatus.IDLE;
         await this.agentRepository.update(agent);
         this.emitStatus(agent.id, agent.status, workspaceId, task.id, runId, 'model_not_found');
@@ -284,18 +303,62 @@ export class AgentRunnerService implements OnModuleInit {
         this.emitQueueState(agent.id, workspaceId);
         return;
       }
-      agentEventEmitter.emit('agent:run:model', { runId, agentId: agent.id, taskId: task.id, state: 'ready', provider: resolved.provider, modelId: resolved.modelId, emittedAt: Date.now() });
 
-      const { sessionManager, isResumed } = this.resolveSessionManager(agent, cwd);
-      console.log(`[AgentRunner] creating session agent=${agent.nickname} cwd=${cwd} resumed=${isResumed} model=${resolved.raw}`);
+      let isResumed = false;
+      let sessionManager: any;
+      if (agent.current_session_id && fs.existsSync(agent.current_session_id)) {
+        sessionManager = SessionManager.open(agent.current_session_id);
+        isResumed = true;
+        console.log(`[AgentRunner] resuming session ${agent.current_session_id}`);
+      } else {
+        const sessionDir = path.join(process.cwd(), 'data', 'sessions', workspaceId, agent.id);
+        if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
+        sessionManager = SessionManager.create(cwd, sessionDir);
+        console.log(`[AgentRunner] created session in ${sessionDir}`);
+      }
+
+      const isDelegationResult = (task as any).task_flow === 'delegation_result';
+      const senderAgent = (task as any).sender_agent_id && (task as any).sender_agent_id !== 'user'
+        ? await this.identityResolverService.resolveById?.((task as any).sender_agent_id) ?? (await this.identityResolverService.getAvailableAgents(workspaceId)).find((a: any) => a.id === (task as any).sender_agent_id) ?? null
+        : null;
+      const sender = (task as any).sender_agent_id === 'user'
+        ? { nickname: 'user', role: 'USER', id: 'user' }
+        : senderAgent ? { nickname: senderAgent.nickname, role: senderAgent.role, id: senderAgent.id } : { nickname: String((task as any).sender_agent_id || 'desconocido'), role: '', id: String((task as any).sender_agent_id || '') };
+      const promptText = await this.promptBuilder.build({
+        agent,
+        taskPayload: task.payload,
+        team: availableAgents,
+        isResumed,
+        isDelegationResult,
+        callbackContext: (task as any).callback_context ?? null,
+        sender,
+        depth: Number((task as any).depth ?? 0),
+        depthPath: (task as any).depth_path ?? null,
+      });
       const systemPrompt = await this.promptBuilder.buildSystem({ agent, team: availableAgents });
-      const promptText = await this.promptBuilder.build({ agent, taskPayload: task.payload, team: availableAgents, isResumed });
+      this.trace.turnInput(runId, agent.id, workspaceId, task.id, 'turn', promptText.length).catch(() => {});
+      this.trace.record({ runId, agentId: agent.id, eventType: 'session', taskId: task.id, workspaceId, eventData: { resumedSession: isResumed, sessionId: agent.current_session_id || null, cwd, depth: (task as any).depth ?? 0, depth_path: (task as any).depth_path ?? null } }).catch(() => {});
+      this.trace.record({ runId, agentId: agent.id, eventType: 'model', taskId: task.id, workspaceId, eventData: { provider: resolved.provider, modelId: resolved.modelId, raw: resolved.raw } }).catch(() => {});
+      if (isDelegationResult) this.trace.record({ runId, agentId: agent.id, eventType: 'callback_received', taskId: task.id, workspaceId, eventData: { parent_task_id: task.parent_task_id, depth: (task as any).depth ?? 0 } }).catch(() => {});
+      console.log(`[AgentRunner] system prompt resolved for ${agent.nickname} (resumed=${isResumed}, delegationResult=${isDelegationResult}, depth=${(task as any).depth ?? 0})`);
+      this.trace.modelSet(runId, agent.id, workspaceId, task.id, resolved.provider, resolved.modelId).catch(() => {});
+      agentEventEmitter.emit('agent:run:model', { runId, agentId: agent.id, taskId: task.id, state: 'ready', provider: resolved.provider, modelId: resolved.modelId, emittedAt: Date.now() });
+      this.trace.start(runId, agent.id, workspaceId, task.id).catch(() => {});
+      if (isDelegationResult) this.trace.delegationResult(runId, agent.id, workspaceId, task.id).catch(() => {});
+      this.trace[isResumed ? 'sessionResumed' : 'sessionCreated'](runId, agent.id, workspaceId, String((sessionManager as any)?.getSessionFile?.() || '')).catch(() => {});
+      this.trace.systemPromptApplied(runId, agent.id, workspaceId, task.id, isResumed).catch(() => {});
+      this.trace.turnInput(runId, agent.id, workspaceId, task.id, 'turn', promptText.length).catch(() => {});
+
       if (isResumed) {
         this.systemPromptInjected.add(agent.id);
       } else if (!this.systemPromptInjected.has(agent.id)) {
         const additional = (agent as any).additional_instruction?.trim();
         const ctx = `[SYSTEM CONTEXT · injected by Pi-Hive]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${workspaceId}).\n\n${systemPrompt}` + (additional ? `\n\n[ADDITIONAL INSTRUCTION]\n${additional}` : '');
         await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'system_prompt', ctx, `system-${agent.id}-${Date.now()}`).catch(() => {});
+        this.systemPromptInjected.add(agent.id);
+      } else if (!isResumed && !isDelegationResult) {
+        // first task of new session but injection marker missing in-memory (e.g. after restart) - re-inject visibly once
+        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'system_prompt', `[SYSTEM CONTEXT · injected by Pi-Hive]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${workspaceId}).\n\n${systemPrompt}`, `system-${agent.id}-${Date.now()}`).catch(() => {});
         this.systemPromptInjected.add(agent.id);
       }
       let resourceLoader: any = undefined;
@@ -326,7 +389,6 @@ export class AgentRunnerService implements OnModuleInit {
       let runError: string | null = null;
       let lastStopReason: string | null = null;
       let lastErrorMessage: string | null = null;
-      const startedAt = Date.now();
       const flush = async () => {
         if (thinkBuf) { const t = thinkBuf; thinkBuf = ''; await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'thinking', t, groupId).catch(() => {}); }
         if (toolBuf) { const t = toolBuf; toolBuf = ''; await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'tool_call', t, groupId).catch(() => {}); }
@@ -341,15 +403,15 @@ export class AgentRunnerService implements OnModuleInit {
       const unsubscribe = session.subscribe((event: any) => {
         if (event.type === 'message_update' && event.assistantMessageEvent) {
           const ame = event.assistantMessageEvent;
-          if (ame.type === 'text_delta' && ame.delta) { assistantText += ame.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: ame.delta, kind: 'text', emittedAt: Date.now() }); }
-          if (ame.type === 'thinking_delta' && ame.delta) { thinkBuf += ame.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: ame.delta, kind: 'thinking', emittedAt: Date.now() }); scheduleFlush(); }
-          if (ame.type === 'toolcall_start' || ame.type === 'toolcall_end') { const tc = ame.toolCall || {}; const s = JSON.stringify({ tool: tc.name, args: tc.arguments }); if (ame.type === 'toolcall_end') { toolBuf += s + '\n'; scheduleFlush(); } agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: ame.type === 'toolcall_end' ? 'call' : 'start', toolName: tc.name, toolCallId: tc.id, args: tc.arguments, emittedAt: Date.now() }); }
+          if (ame.type === 'text_delta' && ame.delta) { assistantText += ame.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: ame.delta, kind: 'text', emittedAt: Date.now() }); this.trace.textOutput(runId, agent.id, workspaceId, task.id, ame.delta.length).catch(() => {}); }
+          if (ame.type === 'thinking_delta' && ame.delta) { thinkBuf += ame.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: ame.delta, kind: 'thinking', emittedAt: Date.now() }); this.trace.thinking(runId, agent.id, workspaceId, task.id, ame.delta.length).catch(() => {}); scheduleFlush(); }
+          if (ame.type === 'toolcall_start' || ame.type === 'toolcall_end') { const tc = ame.toolCall || {}; const s = JSON.stringify({ tool: tc.name, args: tc.arguments }); if (ame.type === 'toolcall_end') { toolBuf += s + '\n'; scheduleFlush(); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(tc.name || ''), JSON.stringify(tc.arguments||'')).catch(() => {}); } agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: ame.type === 'toolcall_end' ? 'call' : 'start', toolName: tc.name, toolCallId: tc.id, args: tc.arguments, emittedAt: Date.now() }); }
           if (ame.error) { runError = String(ame.error?.message || ame.error); lastErrorMessage = runError; }
         }
         if (event.type === 'text_delta' && event.delta) { assistantText += event.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: event.delta, kind: 'text', emittedAt: Date.now() }); }
-        if (event.type === 'tool_execution_start') { const s = JSON.stringify({ tool: event.toolName, args: event.args }); toolBuf += s + '\n'; agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'start', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); scheduleFlush(); }
-        if (event.type === 'tool_execution_end') { agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: event.isError ? 'error' : 'end', toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: event.isError ? String(event.result || 'error').slice(0, 300) : undefined, emittedAt: Date.now() }); }
-        if (event.type === 'tool_call' && event.toolName) { const s = JSON.stringify({ tool: event.toolName, args: event.args }); toolBuf += s + '\n'; agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'call', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); scheduleFlush(); }
+        if (event.type === 'tool_execution_start') { const s = JSON.stringify({ tool: event.toolName, args: event.args }); toolBuf += s + '\n'; this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(event.toolName||''), s).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'start', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); scheduleFlush(); }
+        if (event.type === 'tool_execution_end') { this.trace.toolResult(runId, agent.id, workspaceId, task.id, String(event.toolName||''), !!event.isError, JSON.stringify(event.result||'').length).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: event.isError ? 'error' : 'end', toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: event.isError ? String(event.result || 'error').slice(0, 300) : undefined, emittedAt: Date.now() }); }
+        if (event.type === 'tool_call' && event.toolName) { const s = JSON.stringify({ tool: event.toolName, args: event.args }); toolBuf += s + '\n'; this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(event.toolName||''), s).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'call', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); scheduleFlush(); }
         if (event.type === 'agent_end') { willRetry = !!event.willRetry; pickAssistantMeta(event); }
         if (event.type === 'agent_settled') { settledAborted = !!event.aborted; }
         if (event.type === 'auto_retry_start') { willRetry = true; agentEventEmitter.emit('agent:run:warning', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'auto_retry', message: `retry ${event.attempt ?? ''}`, emittedAt: Date.now() }); }
@@ -381,6 +443,7 @@ export class AgentRunnerService implements OnModuleInit {
             await this.taskQueueRepository.update(freshStop);
             try { await this.saveChatEvent(workspaceId, agent.id, freshStop, 'OUTBOUND', 'response', stopMsg, groupId); } catch {}
           }
+          this.trace.close(runId, agent.id, workspaceId, task.id, 'stopped', lastStopReason || 'user_stop', durationMs, false).catch(() => {});
           agentEventEmitter.emit('agent:run:finished', { agentId: agent.id, workspaceId, taskId: task.id, runId, outcome: 'stopped', stopReason: lastStopReason || 'user_stop', aborted: true, willRetry: false, durationMs, emittedAt: Date.now() });
           return;
         }
@@ -391,6 +454,8 @@ export class AgentRunnerService implements OnModuleInit {
           (task as any).response = `⚠️ Error de ejecución: ${String(finalErr).slice(0, 600)}`;
           await this.taskQueueRepository.update(task);
           await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', (task as any).response, groupId).catch(() => {});
+          this.trace.error(runId, agent.id, workspaceId, task.id, 'prompt_failed', String(finalErr)).catch(() => {});
+          this.trace.close(runId, agent.id, workspaceId, task.id, 'error', lastStopReason || undefined, durationMs, false).catch(() => {});
           agentEventEmitter.emit('agent:run:error', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'prompt_failed', message: finalErr, emittedAt: Date.now() });
           agentEventEmitter.emit('agent:run:finished', { agentId: agent.id, workspaceId, taskId: task.id, runId, outcome: 'error', stopReason: lastStopReason, errorMessage: finalErr, willRetry: false, aborted: false, durationMs, emittedAt: Date.now() });
           return;
@@ -408,9 +473,77 @@ export class AgentRunnerService implements OnModuleInit {
         task.status = 'COMPLETED' as any;
         (task as any).response = responseText;
         await this.taskQueueRepository.update(task);
+        this.trace.close(runId, agent.id, workspaceId, task.id, outcome, lastStopReason || undefined, durationMs, false).catch(() => {});
         agentEventEmitter.emit('agent:run:finished', { agentId: agent.id, workspaceId, taskId: task.id, runId, outcome, stopReason: lastStopReason, willRetry: false, aborted: false, durationMs, emittedAt: Date.now() });
+        // Delegation return:
+        // - Direct task with sender: if we delegated during this run, this turn is intermediate (ack/wait) -> do NOT send result up; the final answer will flow up when the callback chain resolves. If not, return result to sender.
+        // - Delegation_result task (consuming): if we delegated further, wait for chain; if not, this is the final synthesis for the original delegation branch -> return result to the origin delegator (sender of the ancestor direct task received by this agent).
         if (task.sender_agent_id && task.sender_agent_id !== 'user') {
-          await this.taskQueueRepository.add({ sender_agent_id: agent.id, receiver_agent_id: task.sender_agent_id, payload: responseText, status: 'PENDING' as any, parent_task_id: task.id, workspace_id: workspaceId, created_at: new Date() } as any);
+          const isConsumingResult = (task as any).task_flow === 'delegation_result';
+          if (isConsumingResult) {
+            this.trace.record({ runId, agentId: agent.id, eventType: 'callback_processed', taskId: task.id, workspaceId, eventData: { depth: (task as any).depth ?? 0, delegatedThisRun } }).catch(() => {});
+            if (!delegatedThisRun) {
+              // find origin delegator: nearest ancestor direct task received by this agent
+              let origin: any = null;
+              try {
+                let cur: any = task;
+                const seen = new Set<number>();
+                while (cur && cur.parent_task_id && !seen.has(cur.id)) {
+                  seen.add(cur.id);
+                  const p = await this.taskQueueRepository.get(cur.parent_task_id);
+                  if (!p) break;
+                  if ((p as any).task_flow !== 'delegation_result' && p.receiver_agent_id === agent.id) { origin = p; break; }
+                  cur = p;
+                }
+              } catch {}
+              const targetSender = origin?.sender_agent_id || task.sender_agent_id;
+              const originDepth = Math.max(0, Number((origin as any)?.depth ?? (task as any).depth ?? 0));
+              const originPath = String((origin as any)?.depth_path || (task as any).depth_path || `/root/${agent.nickname}`);
+              if (targetSender && targetSender !== 'user') {
+                await this.taskQueueRepository.add({
+                  sender_agent_id: agent.id,
+                  receiver_agent_id: targetSender,
+                  payload: `[DELEGATION RESULT from ${agent.nickname} (task #${task.id}, origin #${origin?.id ?? task.id})]\n${responseText}`,
+                  status: 'PENDING' as any,
+                  parent_task_id: task.id,
+                  workspace_id: workspaceId,
+                  task_flow: 'delegation_result',
+                  depth: originDepth,
+                  depth_path: `${originPath}/result`,
+                  parent_task_callback: true,
+                  callback_context: (origin as any)?.callback_context ?? (task as any).callback_context ?? (origin as any)?.payload ?? task.payload,
+                  created_at: new Date(),
+                } as any);
+                this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_enqueued', taskId: task.id, workspaceId, eventData: { to: targetSender, depth: originDepth, originTaskId: origin?.id ?? null } }).catch(() => {});
+              } else {
+                this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_consumed', taskId: task.id, workspaceId, eventData: { returnedTo: targetSender } }).catch(() => {});
+              }
+            } else {
+              // delegated further while consuming; wait for sub-chain callback to report back
+              this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_waiting_subchain', taskId: task.id, workspaceId, eventData: { depth: (task as any).depth ?? 0 } }).catch(() => {});
+            }
+          } else {
+            if (!delegatedThisRun) {
+              const cbDepth = Math.max(0, parentDepth);
+              await this.taskQueueRepository.add({
+                sender_agent_id: agent.id,
+                receiver_agent_id: task.sender_agent_id,
+                payload: `[DELEGATION RESULT from ${agent.nickname} (task #${task.id}, parent #${task.parent_task_id ?? '-'})]\n${responseText}`,
+                status: 'PENDING' as any,
+                parent_task_id: task.id,
+                workspace_id: workspaceId,
+                task_flow: 'delegation_result',
+                depth: cbDepth,
+                depth_path: `${parentDepthPath}/result`,
+                parent_task_callback: true,
+                callback_context: (task as any).callback_context ?? task.payload,
+                created_at: new Date(),
+              } as any);
+              this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_enqueued', taskId: task.id, workspaceId, eventData: { to: task.sender_agent_id, depth: cbDepth } }).catch(() => {});
+            } else {
+              this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_intermediate_ack_suppressed', taskId: task.id, workspaceId, eventData: { to: task.sender_agent_id } }).catch(() => {});
+            }
+          }
         }
       });
     } catch (error: any) {
@@ -419,6 +552,8 @@ export class AgentRunnerService implements OnModuleInit {
       task.status = 'HOLD' as any;
       (task as any).response = `⚠️ Runner error: ${String(error?.message || error).slice(0, 400)}`;
       try { await this.taskQueueRepository.update(task); } catch {}
+      this.trace.error(runId, agent.id, workspaceId, task.id, 'runner_error', String(error?.message || error)).catch(() => {});
+      this.trace.close(runId, agent.id, workspaceId, task.id, 'error', undefined, undefined, false).catch(() => {});
       agentEventEmitter.emit('agent:run:error', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'runner_error', message: String(error?.message || error), emittedAt: Date.now() });
       agentEventEmitter.emit('agent:run:finished', { agentId: agent.id, workspaceId, taskId: task.id, runId, outcome: 'error', errorMessage: String(error?.message || error), willRetry: false, aborted: false, emittedAt: Date.now() });
     } finally {

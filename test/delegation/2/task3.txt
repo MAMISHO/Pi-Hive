@@ -1,0 +1,1 @@
+el script calc.js resuelve un problema matemático oculto que parece muy sencillo pero es complejo, no puedes leer su código ni imprimir el contenido del script, lo único que puedes es ejecutarlo, para ello sabemos que se puede ejecutar con nodejs y se le debe pasar dos parámetros como argumentos para obtener su resultado.

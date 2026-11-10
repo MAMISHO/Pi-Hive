@@ -7,6 +7,7 @@ import { WorkspaceEntity } from '../../../modules/workspace/infra/persistence/se
 import { WorkspaceSystemPromptEntity } from '../../../modules/system-prompts/infra/persistence/sequalize/entities/workspace-system-prompt.schema.js';
 import { AgentSessionHistoryEntity } from '../../../modules/session-history/infra/persistence/sequalize/entities/agent-session-history.schema.js';
 import { AgentChatEventEntity } from '../../../modules/chat-transcript/infra/persistence/sequalize/entities/agent-chat-event.schema.js';
+import { AgentRunLogEntity } from '../../../modules/agent-runner/infra/persistence/sequalize/entities/agent-run-log.schema.js';
 import { DEFAULT_SYSTEM_PROMPT_ID, DEFAULT_SYSTEM_PROMPT_NAME, DEFAULT_SYSTEM_PROMPT_CONTENT } from '../prompts/default-prompts.js';
 
 const dbPath = process.env.DB_PATH ?? './data/pi-hive.db';
@@ -32,8 +33,27 @@ export const databaseProviders = [
           WorkspaceSystemPromptEntity,
           AgentSessionHistoryEntity,
           AgentChatEventEntity,
+          AgentRunLogEntity,
         ]);
         await sequelize.sync();
+        // sqlite sync() doesn't add new columns to existing tables; add missing columns
+        try {
+          const [cols]: any = await sequelize.query("PRAGMA table_info(tasks_queue);");
+          const names = new Set((cols || []).map((c: any) => c.name));
+          const adds: Array<[string, string]> = [
+            ['task_flow', "ALTER TABLE tasks_queue ADD COLUMN task_flow VARCHAR(255) DEFAULT 'direct';"],
+            ['depth', "ALTER TABLE tasks_queue ADD COLUMN depth INTEGER DEFAULT 0;"],
+            ['depth_path', "ALTER TABLE tasks_queue ADD COLUMN depth_path VARCHAR(255);"],
+            ['parent_task_callback', "ALTER TABLE tasks_queue ADD COLUMN parent_task_callback BOOLEAN DEFAULT 0;"],
+            ['callback_context', "ALTER TABLE tasks_queue ADD COLUMN callback_context TEXT;"],
+          ];
+          for (const [name, sql] of adds) {
+            if (!names.has(name)) {
+              await sequelize.query(sql);
+              console.log(`[DB] added tasks_queue.${name}`);
+            }
+          }
+        } catch (e) { console.warn('[DB] tasks_queue migrate:', (e as any)?.message || e); }
         console.log('Database synchronized (alter).');
 
         // Seed immutable default system prompt (global)

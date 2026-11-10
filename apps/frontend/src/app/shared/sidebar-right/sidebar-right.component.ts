@@ -1,16 +1,26 @@
-import { Component, OnInit, OnDestroy } from '@angular/core';
+import { AfterViewInit, ChangeDetectorRef, Component, ElementRef, OnDestroy, OnInit, QueryList, ViewChildren } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TagModule } from 'primeng/tag';
 import { ButtonModule } from 'primeng/button';
+import { forkJoin, of, Subscription } from 'rxjs';
+import { catchError } from 'rxjs/operators';
 import { TaskService } from '../../core/services/task.service';
 import { WebsocketService } from '../../core/services/websocket.service';
 import { WorkspaceService } from '../../core/services/workspace.service';
+import { AgentService } from '../../core/services/agent.service';
 import { ITaskQueue } from '../../core/models/task.model';
-import { Subscription } from 'rxjs';
+import { IAgent } from '../../core/models/agent.model';
 
-interface TaskNode extends ITaskQueue {
+interface GraphNode extends ITaskQueue {
   depth: number;
+  lane: number;
+  isResult: boolean;
+  flow: 'in' | 'out';
+  color: string;
+  agentLabel: string;
 }
+
+interface Edge { x1:number; y1:number; x2:number; y2:number; color:string; kind:'down'|'return'; d:string; }
 
 @Component({
   selector: 'app-sidebar-right',
@@ -22,106 +32,186 @@ interface TaskNode extends ITaskQueue {
         <h2>Task Lineage</h2>
         <div class="head-actions"><span class="count">{{ tasks.length }}</span><button pButton icon="pi pi-trash" severity="danger" [text]="true" class="p-button-sm" title="Limpiar Task Lineage" (click)="clearLineage()"></button></div>
       </div>
-      <div class="timeline">
-        @for (task of ordered; track task.id) {
-          <div class="task-timeline-item" [class]="task.status.toLowerCase()" [style.padding-left.px]="16 + task.depth * 18">
-            <div class="task-header">
-              <span class="task-id">#{{ task.id }}</span>
-              <p-tag [value]="task.status" [severity]="severity(task.status)"></p-tag>
+      <div class="legend" *ngIf="agents.length">
+        <span class="leg" *ngFor="let a of agents"><i [style.background]="agentColor(a.id)"></i>{{a.nickname}}</span>
+      </div>
+      <div class="timeline" #timeline>
+        <svg class="graph" *ngIf="edges.length" [attr.width]="graphW" [attr.height]="graphH">
+          <path *ngFor="let e of edges" [attr.d]="e.d" [attr.stroke]="e.color" fill="none" stroke-width="2" stroke-linecap="round" [attr.stroke-dasharray]="e.kind==='return' ? '4 3' : null" opacity="0.85"/>
+          <circle class="node" *ngFor="let n of nodes; let i = index" [attr.cx]="cx(n)" [attr.cy]="cy[i]||0" r="5" [attr.fill]="n.color" [attr.stroke]="'var(--bg-secondary,#111827)'" stroke-width="1.5">
+            <title>{{ nodeTitle(n) }}</title>
+          </circle>
+        </svg>
+        <div class="rows" [style.padding-left.px]="graphW">
+          @for (n of nodes; track n.id; let i = $index) {
+            <div #row class="task-timeline-item" [class.completed]="n.status==='COMPLETED'" [class.hold]="n.status==='HOLD'||n.status==='STOPPED'" [class.processing]="n.status==='PROCESSING'">
+              <div class="task-header">
+                <span class="flow" [class.out]="n.isResult" [style.color]="n.color">{{ n.isResult ? '↩' : '↳' }}</span>
+                <span class="task-id">#{{ n.id }}</span>
+                <span class="depth">d{{ n.depth }}</span>
+                <p-tag [value]="n.status" [severity]="severity(n.status)"></p-tag>
+              </div>
+              <div class="task-route"><span [style.color]="agentColor(n.sender_agent_id)">{{ label(n.sender_agent_id) }}</span> → <span [style.color]="agentColor(n.receiver_agent_id)">{{ label(n.receiver_agent_id) }}</span></div>
+              @if (n.parent_task_id) { <div class="parent">parent: #{{ n.parent_task_id }} · {{ n.task_flow || 'direct' }}</div> }
+              <div class="payload" [title]="fullText(n)">{{ preview(n.payload) }}</div>
             </div>
-            <div class="task-route">{{ short(task.sender_agent_id) }} → {{ short(task.receiver_agent_id) }}</div>
-            @if (task.parent_task_id) {
-              <div class="parent">parent: #{{ task.parent_task_id }}</div>
-            }
-            <div class="payload">{{ preview(task.payload) }}</div>
-          </div>
-        } @empty {
-          <div class="empty">No tasks yet</div>
-        }
+          } @empty {
+            <div class="empty">No tasks yet</div>
+          }
+        </div>
       </div>
     </div>
   `,
   styles: [`
-    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
     .head-actions{display:flex;align-items:center;gap:4px}
     .header h2 { font-size: 14px; font-weight: 600; color: var(--text-primary); }
     .count { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
-    .task-timeline-item { position: relative; padding-bottom: 14px; border-left: 2px solid var(--border-color); margin-left: 4px; }
-    .task-timeline-item::before { content: ''; position: absolute; left: -6px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent-blue); border: 2px solid var(--bg-secondary); }
-    .task-timeline-item.completed::before { background: var(--accent-green); }
-    .task-timeline-item.hold::before { background: var(--accent-amber); }
-    .task-timeline-item.processing::before { background: var(--accent-purple); }
-    .task-header { display: flex; align-items: center; gap: 8px; }
+    .legend{display:flex;flex-wrap:wrap;gap:6px 10px;margin:0 0 8px 2px}
+    .leg{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text-secondary)}
+    .leg i{width:8px;height:8px;border-radius:50%;display:inline-block}
+    .timeline{position:relative}
+    .graph{position:absolute;left:0;top:0;pointer-events:none;overflow:visible}
+    .graph .node{pointer-events:auto;cursor:pointer}
+    .rows{position:relative}
+    .task-timeline-item { position: relative; padding: 0 0 12px 10px; margin-left: 0; }
+    .task-header { display: flex; align-items: center; gap: 6px; flex-wrap:wrap; }
+    .flow{font-weight:700;font-size:13px;line-height:1}
+    .flow.out{opacity:.9}
     .task-id { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); }
+    .depth{font:10px var(--font-mono);color:var(--text-muted);padding:0 4px;border:1px solid var(--border-color);border-radius:8px}
     .task-route { font-size: 12px; color: var(--text-secondary); margin: 2px 0; font-family: var(--font-mono); }
     .parent { font-size: 10px; color: var(--text-muted); }
-    .payload { font-size: 12px; color: var(--text-secondary); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 290px; }
+    .payload { font-size: 12px; color: var(--text-secondary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; cursor: help; }
     .empty { font-size: 12px; color: var(--text-muted); padding: 8px 0; }
   `],
 })
-export class SidebarRightComponent implements OnInit, OnDestroy {
+export class SidebarRightComponent implements OnInit, AfterViewInit, OnDestroy {
   tasks: ITaskQueue[] = [];
-  ordered: TaskNode[] = [];
+  agents: IAgent[] = [];
+  nodes: GraphNode[] = [];
+  edges: Edge[] = [];
+  cy: number[] = [];
+  graphW = 24; graphH = 0;
+  private agentMap = new Map<string, IAgent>();
   private subs: Subscription[] = [];
+  private laneW = 16;
+  @ViewChildren('row') rows!: QueryList<ElementRef<HTMLElement>>;
 
-  constructor(private taskService: TaskService, private ws: WebsocketService, private workspace: WorkspaceService) {}
+  constructor(private taskService: TaskService, private ws: WebsocketService, private workspace: WorkspaceService, private agentService: AgentService, private cdr: ChangeDetectorRef) {}
 
   ngOnInit(): void {
     this.load();
-    this.subs.push(this.ws.statusChange$.subscribe(() => this.load()));
-    this.subs.push(this.ws.taskUpdated$.subscribe(() => this.load()));
-    this.subs.push(this.ws.tasksCleared$.subscribe(() => this.load()));
-    this.subs.push(this.workspace.active$.subscribe(()=>this.load()));
-    this.subs.push((this.ws as any).transcriptCleared$?.subscribe(()=>this.load()) || {unsubscribe(){}} as any);
-    this.subs.push((this.ws as any).tasksCleared$?.subscribe(()=>this.load()) || {unsubscribe(){}} as any);
+    const rel = () => this.load();
+    this.subs.push(this.ws.statusChange$.subscribe(rel));
+    this.subs.push(this.ws.taskUpdated$.subscribe(rel));
+    this.subs.push(this.ws.tasksCleared$.subscribe(rel));
+    this.subs.push(this.workspace.active$.subscribe(rel));
+    this.subs.push((this.ws as any).transcriptCleared$?.subscribe(rel) || {unsubscribe(){}} as any);
   }
+
+  ngAfterViewInit(): void { this.subs.push(this.rows.changes.subscribe(() => setTimeout(() => this.measure(), 0))); }
 
   load(): void {
     const ws = this.workspace.active;
-    const obs = ws ? (this.taskService as any).getByWorkspace(ws.id) : this.taskService.getAll();
-    obs.subscribe({
-      next: (list) => {
-        this.tasks = list;
-        this.ordered = this.buildLineage(list);
-      },
-      error: () => {
-        this.tasks = [];
-        this.ordered = [];
-      },
+    const tasks$ = (ws ? this.taskService.getByWorkspace(ws.id) : this.taskService.getAll()).pipe(catchError(() => of([] as ITaskQueue[])));
+    const agents$ = this.agentService.getAll().pipe(catchError(() => of([] as IAgent[])));
+    forkJoin({ list: tasks$, ags: agents$ }).subscribe(({ list, ags }) => {
+      this.tasks = (list as ITaskQueue[]) || [];
+      this.agents = ((ags as IAgent[]) || []).filter((a: any) => !ws || a.workspace_id === ws.id);
+      this.agentMap = new Map(this.agents.map(a => [a.id, a]));
+      this.nodes = this.build(this.tasks);
+      setTimeout(() => this.measure(), 0);
+      this.cdr.detectChanges();
     });
   }
 
-  buildLineage(list: ITaskQueue[]): TaskNode[] {
-    const byId = new Map(list.map((t) => [t.id, t]));
-    const depth = (t: ITaskQueue, seen = new Set<number>()): number => {
-      if (!t.parent_task_id) return 0;
-      if (seen.has(t.id)) return 0;
-      seen.add(t.id);
-      const parent = byId.get(t.parent_task_id);
-      return parent ? 1 + depth(parent, seen) : 0;
+  build(list: ITaskQueue[]): GraphNode[] {
+    const byId = new Map(list.map(t => [t.id!, t]));
+    const depthOf = (t: ITaskQueue, seen = new Set<number>()): number => {
+      if (typeof t.depth === 'number') return t.depth;
+      if (!t.parent_task_id) return 0; if (seen.has(t.id!)) return 0; seen.add(t.id!);
+      const p = byId.get(t.parent_task_id); return p ? 1 + depthOf(p, seen) : 0;
     };
-    return list
-      .map((t) => ({ ...t, depth: depth(t) }))
-      .sort((a, b) => a.depth - b.depth || a.id - b.id);
+    // chronological: preserves "chief terminó último y era el más afuera" (returns bubble up in time)
+    const chrono = [...list].sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+    return chrono.map(t => {
+      const depth = depthOf(t);
+      const isResult = t.task_flow === 'delegation_result' || !!t.parent_task_callback || (typeof t.payload === 'string' && t.payload.includes('[DELEGATION RESULT'));
+      const lane = isResult ? Math.max(0, depth - 1) : depth;
+      const color = this.agentColor(isResult ? t.sender_agent_id : t.receiver_agent_id);
+      return { ...t, depth, lane, isResult, flow: isResult ? 'out' : 'in', color, agentLabel: this.label(t.receiver_agent_id) } as GraphNode;
+    });
   }
 
-  short(id: string): string {
-    return id ? id.slice(0, 8) : '';
+  measure(): void {
+    const els = this.rows?.toArray().map(r => r.nativeElement) || [];
+    if (!els.length || !this.nodes.length) { this.edges = []; this.cy = []; this.graphW = 24; this.graphH = 0; return; }
+    const maxLane = Math.max(0, ...this.nodes.map(n => n.lane));
+    this.graphW = 18 + maxLane * this.laneW + 14;
+    const tl = (els[0].offsetParent as HTMLElement) || els[0].parentElement;
+    const tlTop = tl ? tl.getBoundingClientRect().top : 0;
+    this.cy = els.map(el => { const r = el.getBoundingClientRect(); return (r.top - tlTop) + 14; });
+    this.graphH = els.reduce((s, el) => s + el.offsetHeight, 8);
+    this.edges = this.buildEdges();
+    this.cdr.detectChanges();
   }
 
-  preview(p: string): string {
-    if (!p) return '';
-    return p.length > 80 ? p.slice(0, 80) + '…' : p;
+  cx(n: GraphNode): number { return 10 + n.lane * this.laneW; }
+
+  buildEdges(): Edge[] {
+    const idx = new Map<number, number>();
+    this.nodes.forEach((n, i) => { if (n.id != null) idx.set(n.id, i); });
+    const edges: Edge[] = [];
+    this.nodes.forEach((n, i) => {
+      if (!n.parent_task_id) return;
+      const pi = idx.get(n.parent_task_id); if (pi == null) return;
+      const parent = this.nodes[pi];
+      const x1 = this.cx(parent), y1 = this.cy[pi] || 0;
+      const x2 = this.cx(n), y2 = this.cy[i] || 0;
+      const my = (y1 + y2) / 2;
+      // git-like curve: branch down/out on delegation, merge back on result (toward receiver/lower lane)
+      const d = `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
+      edges.push({ x1, y1, x2, y2, color: n.color, kind: n.isResult ? 'return' : 'down', d });
+    });
+    // outer spine (depth 0 lane) for continuity
+    if (this.nodes.length) {
+      const x = 10; const ys = this.cy; if (ys.length > 1) edges.unshift({ x1:x,y1:ys[0],x2:x,y2:ys[ys.length-1],color:'var(--border-color,#334155)',kind:'down', d:`M ${x} ${ys[0]} L ${x} ${ys[ys.length-1]}` });
+    }
+    return edges;
+  }
+
+  agentColor(id: string): string {
+    const a = this.agentMap.get(id); if (a?.color) return a.color; if (id === 'user') return '#9ca3af';
+    let h = 0; for (let i = 0; i < (id || '').length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+    return `hsl(${h % 360} 65% 55%)`;
+  }
+  label(id: string): string { if (id === 'user') return 'user'; return this.agentMap.get(id)?.nickname || this.short(id); }
+  short(id: string): string { return id ? id.slice(0, 8) : ''; }
+  preview(p: string): string { if (!p) return ''; const s = p.replace(/\s+/g, ' ').trim(); return s.length > 90 ? s.slice(0, 90) + '…' : s; }
+
+  fullText(n: GraphNode): string {
+    const payload = (n.payload || '').toString();
+    const response = (n as any).response ? String((n as any).response) : '';
+    return [`#${n.id} ${n.status} · ${n.task_flow || 'direct'} · d${n.depth}`, `From: ${this.label(n.sender_agent_id)} → ${this.label(n.receiver_agent_id)}`, `At: ${this.formatDate(n.created_at)}`, payload ? `\nPayload:\n${payload}` : '', response ? `\nResponse:\n${response}` : ''].filter(Boolean).join('\n');
+  }
+
+  nodeTitle(n: GraphNode): string {
+    return `#${n.id} · ${this.formatDate(n.created_at)}\n${this.label(n.sender_agent_id)} → ${this.label(n.receiver_agent_id)}\n${n.status} (${n.task_flow || 'direct'})`;
+  }
+
+  formatDate(d: any): string {
+    if (!d) return '';
+    try {
+      const dt = new Date(d);
+      if (isNaN(dt.getTime())) return String(d);
+      const pad = (x: number) => x.toString().padStart(2, '0');
+      return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+    } catch { return String(d); }
   }
 
   severity(status: string): 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'contrast' {
-    switch (status) {
-      case 'COMPLETED': return 'success';
-      case 'PROCESSING': return 'info';
-      case 'HOLD': return 'warn';
-      case 'PENDING': return 'secondary';
-      default: return 'contrast';
-    }
+    switch (status) { case 'COMPLETED': return 'success'; case 'PROCESSING': return 'info'; case 'HOLD': case 'STOPPED': return 'warn'; case 'PENDING': return 'secondary'; default: return 'contrast'; }
   }
 
   clearLineage(): void {
@@ -131,7 +221,5 @@ export class SidebarRightComponent implements OnInit, OnDestroy {
     if(!(this.taskService as any).clearByWorkspace) fetch(`http://localhost:8090/tasks/workspace/${ws.id}/clear`,{method:'DELETE'}).then(()=>this.load());
   }
 
-  ngOnDestroy(): void {
-    this.subs.forEach((s) => s.unsubscribe());
-  }
+  ngOnDestroy(): void { this.subs.forEach(s => s.unsubscribe()); }
 }
