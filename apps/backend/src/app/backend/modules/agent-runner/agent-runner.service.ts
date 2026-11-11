@@ -1078,6 +1078,19 @@ export class AgentRunnerService implements OnModuleInit {
     const agent = await this.agentRepository.get(agentId);
     if (!agent) return;
     await this.compactAgentSession(agentId, 'SESSION_CLEARED').catch(() => {});
+
+    // Drop live/in-memory session and runner state so cleared agents never reuse old context/tools/prompts
+    const live = this.activeSessions.get(agentId);
+    if (live) {
+      try { if (typeof (live as any).abort === 'function') await (live as any).abort().catch(() => {}); } catch {}
+      try { if (typeof (live as any).dispose === 'function') (live as any).dispose(); } catch {}
+    }
+    this.activeSessions.delete(agentId);
+    this.systemPromptInjected.delete(agentId);
+    this.currentTaskByAgent.delete(agentId);
+    this.pendingByAgent.delete(agentId);
+    this.processingAgents.delete(agentId);
+
     if (agent.workspace_id) {
       const events = await AgentChatEventEntity.findAll({ where: { workspace_id: agent.workspace_id, agent_id: agent.id } as any, order: [['id', 'ASC']] }).catch(() => [] as any[]);
       const { TaskQueueEntity } = await import('../task-queue/infra/persistence/sequalize/entities/task-queue.schema.js');
@@ -1097,13 +1110,13 @@ export class AgentRunnerService implements OnModuleInit {
         const additional = (agent as any).additional_instruction?.trim();
         const ctx = `[SYSTEM CONTEXT · injected by Pi-Hive (post-clear)]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${agent.workspace_id}).\n\n${sp}` + (additional ? `\n\n[ADDITIONAL INSTRUCTION]\n${additional}` : '');
         await AgentChatEventEntity.create({ workspace_id: agent.workspace_id, agent_id: agent.id, task_id: null, parent_task_id: null, direction: 'OUTBOUND', kind: 'system_prompt', content: ctx, collapsible_group_id: `system-${agent.id}-${Date.now()}`, created_at: new Date() } as any);
-        this.systemPromptInjected.add(agentId);
       } catch {}
     }
-    this.systemPromptInjected.add(agentId);
-    this.activeSessions.delete(agentId);
+
+    this.systemPromptInjected.add(agentId); // mark post-clear context as injected; next run starts fresh session (no current_session_id)
     await this.agentRepository.update({ ...agent, status: 'IDLE', current_session_id: null } as any);
     this.emitStatus(agentId, 'IDLE', (agent as any).workspace_id, null, null, 'session_clear');
+    this.emitQueueState(agentId, (agent as any).workspace_id);
     agentEventEmitter.emit('agent:transcript:cleared', { agentId, workspaceId: agent.workspace_id });
   }
 

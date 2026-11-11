@@ -155,31 +155,36 @@ function toCanonicalTextV2(nodes: DelegationNode[], parada: DelegationParada | s
   return ['PLAN (v2, todos PENDING):', ...renderNodes(nodes), `PARADA: ${paradaToText(parada)}`].join('\n');
 }
 
-// v2: parse & validate tree
+// v2 only: strict schema/keys, no v1/legacy aliases or formats
 function parsePlanV2(obj: any, roster: Array<{ nickname: string }>): { ok: true; nodes: DelegationNode[]; parada: DelegationParada; plan: string } | { ok: false; reason: string } {
-  const rawNodes = Array.isArray(obj?.nodes) ? obj.nodes : (Array.isArray(obj?.tree) ? obj.tree : null);
-  if (!rawNodes) return { ok: false, reason: 'planner_no_nodes' };
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { ok: false, reason: 'planner_invalid_v2_object' };
+  if (obj.schema !== 'v2') return { ok: false, reason: 'planner_v2_required' };
+  if (!Array.isArray(obj.nodes)) return { ok: false, reason: 'planner_no_nodes' };
+
   const validate = (arr: any[], pathPrefix: string, parentDelegateTo: string | null): DelegationNode[] | { err: string } => {
     const out: DelegationNode[] = [];
     for (let i = 0; i < arr.length; i++) {
-      const s = arr[i] || {};
+      const s = arr[i] && typeof arr[i] === 'object' && !Array.isArray(arr[i]) ? arr[i] : {};
       const id = String(s.id || (pathPrefix ? `${pathPrefix}.${i + 1}` : `${i + 1}`)).trim();
-      const ownerRaw = String(s.owner ?? s.responsable ?? s.destino ?? s.target ?? s.agent ?? '').trim();
+      const ownerRaw = String(s.owner ?? '').trim();
       const owner = canonicalNick(roster, ownerRaw);
       if (!owner) return { err: `invalid_node_${id}_owner_not_in_roster:${ownerRaw || '(vacío)'}` };
       if (parentDelegateTo && normNick(owner) !== normNick(parentDelegateTo)) return { err: `invalid_node_${id}_owner_mismatch_parent_delegate:${ownerRaw}` };
-      const dtRaw = s.delegate_to ?? s.delegateTo ?? s.delegar_a ?? s.to ?? null;
+
+      const dtRaw = s.delegate_to;
       let delegate_to: string | null = null;
       if (dtRaw != null && String(dtRaw).trim() !== '' && String(dtRaw).toLowerCase() !== 'null' && String(dtRaw).toLowerCase() !== 'none') {
         const dn = canonicalNick(roster, String(dtRaw));
         if (!dn) return { err: `invalid_node_${id}_delegate_to_not_in_roster:${String(dtRaw)}` };
         delegate_to = dn;
       }
-      const action = String(s.action ?? s.accion ?? s.task ?? s.instruction ?? '').trim();
-      const deliver_to = String(s.deliver_to ?? s.entrega ?? s.return_to ?? s.report_to ?? s.deliverTo ?? 'solicitante').trim() || 'solicitante';
-      const stop = String(s.stop ?? s.condicion ?? s.condition ?? s.halt ?? '').trim();
+
+      const action = String(s.action ?? '').trim();
+      const deliver_to = String(s.deliver_to ?? 'solicitante').trim() || 'solicitante';
+      const stop = String(s.stop ?? '').trim();
       if (!action || !stop) return { err: `invalid_node_${id}_missing_fields` };
-      const childrenRaw = Array.isArray(s.children) ? s.children : (Array.isArray(s.subnodes) ? s.subnodes : []);
+
+      const childrenRaw = Array.isArray(s.children) ? s.children : [];
       let children: DelegationNode[] = [];
       if (childrenRaw.length) {
         const cv = validate(childrenRaw, id, delegate_to || owner);
@@ -190,20 +195,20 @@ function parsePlanV2(obj: any, roster: Array<{ nickname: string }>): { ok: true;
     }
     return out;
   };
-  const vr = validate(rawNodes, '', null);
+
+  const vr = validate(obj.nodes, '', null);
   if ((vr as any).err) return { ok: false, reason: (vr as any).err };
   const nodes = vr as DelegationNode[];
   if (!nodes.length) return { ok: false, reason: 'planner_no_nodes' };
+
   let parada: DelegationParada = { ...DEFAULT_PARADA };
-  const p = obj?.parada ?? obj?.stop;
-  if (p && typeof p === 'object') {
+  const p = obj.parada;
+  if (p && typeof p === 'object' && !Array.isArray(p)) {
     parada = {
-      success: String(p.success || p.exito || DEFAULT_PARADA.success),
-      on_failure: String(p.on_failure || p.fallo || p.failure || DEFAULT_PARADA.on_failure),
+      success: String((p as any).success || DEFAULT_PARADA.success),
+      on_failure: String((p as any).on_failure || DEFAULT_PARADA.on_failure),
       assumes_result: false,
     };
-  } else if (typeof p === 'string' && p.trim()) {
-    parada = { success: p.trim(), on_failure: DEFAULT_PARADA.on_failure, assumes_result: false };
   }
   return { ok: true, nodes, parada, plan: toCanonicalTextV2(nodes, parada) };
 }
@@ -212,14 +217,12 @@ function parsePlan(text: string, roster: Array<{ nickname: string }>): (Delegati
   const raw = String(text || '').trim();
   if (!raw) return { ok: false, reason: 'planner_empty_response' };
   const { obj, repaired, parsePath } = extractJsonBlock(raw);
-  const looksV2 = !!(obj && (obj.schema === 'v2' || Array.isArray(obj.nodes) || Array.isArray(obj.tree))) || /"schema"\s*:\s*"v2"|"nodes"\s*:/.test(raw);
-  if (obj && (obj.schema === 'v2' || Array.isArray(obj.nodes) || Array.isArray(obj.tree))) {
-    const v2 = parsePlanV2(obj, roster);
-    if (v2.ok === true) return { ok: true, schema: 'v2', nodes: v2.nodes, parada: v2.parada, plan: v2.plan, repaired, parsePath };
-    return { ok: false, reason: v2.reason, reason_detail: v2.reason, repaired, parsePath };
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    return { ok: false, reason: 'planner_invalid_json_v2', reason_detail: 'invalid_or_truncated_v2_json', repaired, parsePath };
   }
-  if (looksV2) return { ok: false, reason: 'planner_invalid_json_v2', reason_detail: 'invalid_or_truncated_v2_json', repaired, parsePath };
-  return { ok: false, reason: 'planner_v2_required', reason_detail: 'planner_v2_required', repaired, parsePath };
+  const v2 = parsePlanV2(obj, roster);
+  if (v2.ok === true) return { ok: true, schema: 'v2', nodes: v2.nodes, parada: v2.parada, plan: v2.plan, repaired, parsePath };
+  return { ok: false, reason: v2.reason, reason_detail: v2.reason, repaired, parsePath };
 }
 
 @Injectable()
