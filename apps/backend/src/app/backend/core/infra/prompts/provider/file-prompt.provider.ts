@@ -38,4 +38,8 @@ export class FilePromptProvider implements IPromptProvider {
   getChiefDefault(): string {
     return this.get(PROMPT_FILES.CHIEF_DEFAULT);
   }
+
+  getWorkerCoordination(): string {
+    return this.get(PROMPT_FILES.WORKER_COORDINATION);
+  }
 }

@@ -23,8 +23,11 @@ export class PromptBuilderService {
     const chief = agent.role === 'CHIEF'
       ? `\n${this.prompts.renderChief(workspace?.custom_chief_prompt?.trim() || this.prompts.chiefDefaultContent, teamRoster)}\nComo CHIEF: delega al worker adecuado por nickname exacto y, en la instruction, transmite el PLAN COMPLETO (sub-objetivos + qué hacer con el resultado y a quién devolverlo). El CHIEF NO contacta directamente a agentes intermedios que correspondan al worker (p.ej. si el plan es "Bob pregunta a Pam y te reporta", el Chief delega SOLO a Bob con ese plan). Sintetiza y entrega la respuesta final al usuario.`
       : '';
+    const workerCoord = agent.role !== 'CHIEF'
+      ? `\n${this.prompts.renderWorkerCoordination(teamRoster)}\nComo miembro del equipo (no jefe): si el encargo asigna acciones a otros agentes, delega al responsable directo indicado (nickname exacto) con la instrucción/plan completo, respeta la secuencia e intermediarios y no asumas su identidad ni su tramo; al recibir el RESULT integra y entrega la respuesta al solicitante.`
+      : '';
     const additional = agent.additional_instruction?.trim() ? `\n[INSTRUCCIÓN AGENTE]\n${agent.additional_instruction.trim()}` : '';
-    return `[PI-HIVE SYSTEM]\n${identity}\n${anti}\n\n${systemPrompt || ''}${chief}${additional}\n\n[EQUIPO (OTROS agentes · nicknames exactos para delegar; tú eres "${agent.nickname}")]\n${teamRoster}`;
+    return `[PI-HIVE SYSTEM]\n${identity}\n${anti}\n\n${systemPrompt || ''}${chief}${workerCoord}${additional}\n\n[EQUIPO (OTROS agentes · nicknames exactos para delegar; tú eres "${agent.nickname}")]\n${teamRoster}`;
   }
 
   async build(params: { agent: IAgent; taskPayload: string; team: IAgent[]; isResumed: boolean; isDelegationResult?: boolean; isDelegationProgress?: boolean; callbackContext?: string | null; sender?: { nickname: string; role?: string; id?: string } | null; depth?: number; depthPath?: string | null; planRef?: number | null; planBlock?: string | null; origin?: { nickname: string; role?: string; id?: string; rootTaskId?: number | null; rootUserPayload?: string | null } | null; taskId?: number | null; requestId?: number | null }): Promise<string> {
@@ -44,7 +47,9 @@ export class PromptBuilderService {
     const originLine = origin ? ` Solicitante/origen de la cadena: ${origin.nickname}${origin.role ? ` (${origin.role})` : ''}${origin.rootTaskId ? `, request raíz=#${origin.rootTaskId}` : ''}.` : '';
     const ids = [taskId ? `task=#${taskId}` : null, requestId ? `request=#${requestId}` : null, origin?.rootTaskId ? `origin=#${origin.rootTaskId}` : null].filter(Boolean).join(' ');
     const meta = ` depth=${depth ?? 0}${depthPath ? ` branch=${depthPath}` : ''}${ids ? ` ${ids}` : ''}.`;
-    const chiefNote = agent.role === 'CHIEF' ? ` CHIEF: coordina y delega al responsable (plan completo); ante resultado ya entregado, sintetiza sin re-orquestar.` : '';
+    const roleNote = agent.role === 'CHIEF'
+      ? ` CHIEF: coordina y delega al responsable directo (plan completo), no contactes intermediarios que le correspondan; ante resultado ya entregado, sintetiza sin re-orquestar.`
+      : ` Miembro del equipo (no jefe): puedes coordinar/delegar; si el encargo asigna acciones a otros agentes, delega al responsable directo indicado (nickname exacto) con plan completo, respeta secuencia/intermediarios y no asumas su identidad ni su tramo; ante RESULT integra y entrega al solicitante.`;
     const planningNote = (!hasPlan && flow === 'direct' && sender?.id === 'user')
       ? ' Decide ANTES de delegar si necesitas plan de ruta: si la orden define cadena/secuencia, menciona 2+ agentes, requiere intermediarios que medien/reenvíen, ida-vuelta o resultados encadenados, llama a plan_delegation(user_task=<orden/objetivo original completo>) una vez al inicio y sigue el tracking; si es conversación directa o un único paso simple, no hace falta plan. Si plan_delegation falla o es inválido, continúa con tu criterio.'
       : '';
@@ -55,7 +60,7 @@ export class PromptBuilderService {
     const asyncNote = (flow === 'direct' && !sender) ? '' : ' Si delegas, no esperes/pollees: termina el turno.';
     const semantics = ' Coordinación en Pi-Hive: no hay chat directo agente↔agente; se coordina por delegate_task y devolviendo el resultado de tu tramo en la respuesta (el runtime lo enruta). Cumple el encargo concreto de este mensaje (p.ej. si te piden responder con una palabra/dato, responde ese dato); si debes involucrar a otro agente de la cadena, delega con instrucción completa (remitente, solicitante/origen y objetivo, acción concreta y respuesta esperada de ESTE agente, y a quién entregar).';
     const originHint = origin?.rootUserPayload ? `\n[OBJETIVO RAÍZ (referencia, solicitud original)] ${String(origin.rootUserPayload).replace(/\s+/g,' ').trim().slice(0, 400)}` : '';
-    return `[PI-HIVE] Eres ${agent.nickname} (${agent.role}).${senderLine}${originLine}${meta}${chiefNote} Equipo: ${teamShort}. Nicknames exactos (solo alias). No explores salvo petición explícita. \`branch/depth/request/origin/path\` son metadatos de cadena, no rutas de filesystem.${semantics}${planningNote}${asyncNote}${turnNote}${delegationNote}${planNote}${originHint}\n---\n${taskPayload}`;
+    return `[PI-HIVE] Eres ${agent.nickname} (${agent.role}).${senderLine}${originLine}${meta}${roleNote} Equipo: ${teamShort}. Nicknames exactos (solo alias). No explores salvo petición explícita. \`branch/depth/request/origin/path\` son metadatos de cadena, no rutas de filesystem.${semantics}${planningNote}${asyncNote}${turnNote}${delegationNote}${planNote}${originHint}\n---\n${taskPayload}`;
   }
 
   private async resolveSystemPrompt(workspace: IWorkspace | null): Promise<string> {

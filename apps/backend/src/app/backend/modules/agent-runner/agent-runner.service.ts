@@ -440,13 +440,18 @@ export class AgentRunnerService implements OnModuleInit {
           }
           const plannerInputTask = String(params.user_task || '').trim() || String((task as any).callback_context || task.payload || '').trim();
           try {
+            const requesterLabel = (task as any).sender_agent_id === 'user'
+              ? 'user (solicitante, NO es agente del roster)'
+              : (sender?.nickname ? `${sender.nickname}${sender.role ? ` (${sender.role})` : ''} (solicitante, NO es agente del roster)` : 'solicitante (NO es agente del roster)');
             const res = await delegationPlannerService.planOneShot({
               model: agentModel,
               runtime: agentRuntime,
               userTask: plannerInputTask,
               roster: rosterForPlanner,
+              requesterLabel,
               cwd,
-              timeoutMs: 45_000,
+              idleTimeoutMs: 45_000,
+              hardMaxMs: 300_000,
             });
             const plannerMs = res.plannerMs ?? 0;
             const plannerModel = agentModelRaw;
@@ -643,6 +648,19 @@ export class AgentRunnerService implements OnModuleInit {
         await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'thinking', payload, groupId).catch(() => {});
       };
 
+      const toResultSummary = (v: any): string => {
+        if (v == null) return '';
+        if (typeof v === 'string') return v.slice(0, 1200);
+        try {
+          // Prefer readable tool text if present (e.g. {content:[{text:...}], details:{...}})
+          const text = Array.isArray(v?.content) ? v.content.map((c: any) => c?.text).filter(Boolean).join('\n') : null;
+          const details = v?.details ? ` | details=${JSON.stringify(v.details)}` : '';
+          if (text) return `${text}${details}`.slice(0, 1200);
+          return JSON.stringify(v).slice(0, 1200);
+        } catch {
+          return String(v).slice(0, 1200);
+        }
+      };
       const saveToolEvent = async (phase: 'start'|'call'|'end'|'error', info: { toolName?: string; toolCallId?: string; args?: any; resultSummary?: any; isError?: boolean }) => {
         toolSeq += 1;
         const payload = JSON.stringify({ ...info, phase, order: toolSeq });
@@ -665,7 +683,7 @@ export class AgentRunnerService implements OnModuleInit {
         }
         if (event.type === 'text_delta' && event.delta) { flushThinking().catch(() => {}); assistantText += event.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: event.delta, kind: 'text', emittedAt: Date.now() }); }
         if (event.type === 'tool_execution_start') { flushThinking().catch(() => {}); const s = JSON.stringify({ tool: event.toolName, args: event.args }); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(event.toolName||''), s).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'start', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); saveToolEvent('start', { toolName: event.toolName, toolCallId: event.toolCallId, args: event.args }).catch(() => {}); }
-        if (event.type === 'tool_execution_end') { this.trace.toolResult(runId, agent.id, workspaceId, task.id, String(event.toolName||''), !!event.isError, JSON.stringify(event.result||'').length).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: event.isError ? 'error' : 'end', toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: event.isError ? String(event.result || 'error').slice(0, 300) : undefined, emittedAt: Date.now() }); saveToolEvent(event.isError ? 'error' : 'end', { toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: event.isError ? String(event.result || 'error').slice(0, 800) : String(event.result ?? '').slice(0, 800), isError: !!event.isError }).catch(() => {}); }
+        if (event.type === 'tool_execution_end') { const resultSummaryFull = toResultSummary(event.result); this.trace.toolResult(runId, agent.id, workspaceId, task.id, String(event.toolName||''), !!event.isError, resultSummaryFull.length).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: event.isError ? 'error' : 'end', toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: event.isError ? resultSummaryFull.slice(0, 300) : undefined, emittedAt: Date.now() }); saveToolEvent(event.isError ? 'error' : 'end', { toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: resultSummaryFull, isError: !!event.isError }).catch(() => {}); }
         if (event.type === 'tool_call' && event.toolName) { flushThinking().catch(() => {}); const s = JSON.stringify({ tool: event.toolName, args: event.args }); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(event.toolName||''), s).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'call', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); saveToolEvent('call', { toolName: event.toolName, toolCallId: event.toolCallId, args: event.args }).catch(() => {}); }
         if (event.type === 'agent_end') { willRetry = !!event.willRetry; pickAssistantMeta(event); flushThinking().catch(() => {}); }
         if (event.type === 'agent_settled') { settledAborted = !!event.aborted; }

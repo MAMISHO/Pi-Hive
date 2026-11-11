@@ -10,8 +10,13 @@ export class PromptCatalogService {
   get systemDefaultName(): string { return DEFAULT_SYSTEM_PROMPT_NAME; }
   get systemDefaultContent(): string { return this.provider.getSystemDefault(); }
   get chiefDefaultContent(): string { return this.provider.getChiefDefault(); }
+  get workerCoordinationContent(): string { return this.provider.getWorkerCoordination(); }
 
   renderChief(template: string, teamRoster: string): string {
     return (template || this.chiefDefaultContent).replace('{{TEAM_ROSTER}}', teamRoster);
+  }
+
+  renderWorkerCoordination(teamRoster: string): string {
+    return this.workerCoordinationContent.replace('{{TEAM_ROSTER}}', teamRoster);
   }
 }

@@ -11,8 +11,11 @@ export interface DelegationPlanInput {
   runtime: any;
   userTask: string;
   roster: Array<{ nickname: string; role?: string; id?: string }>;
+  requesterLabel?: string; // e.g. "user" (not a roster agent; must not be a destino)
   cwd: string;
-  timeoutMs?: number;
+  timeoutMs?: number; // legacy: treated as idle timeout
+  idleTimeoutMs?: number; // extend while activity observed (no-activity window)
+  hardMaxMs?: number; // absolute cap (default 5 min)
 }
 
 export interface DelegationPlanResult {
@@ -22,6 +25,7 @@ export interface DelegationPlanResult {
   parada?: string | null;
   reason?: string;
   plannerMs?: number;
+  firstActivityMs?: number | null;
 }
 
 function stripFrontmatter(content: string): string {
@@ -105,7 +109,7 @@ function parsePlan(text: string, roster: Array<{ nickname: string }>): { ok: tru
 
 @Injectable()
 export class DelegationPlannerService {
-  private buildSystemPrompt(rosterText: string): string {
+  private buildSystemPrompt(rosterText: string, requesterLabel?: string): string {
     let skillBody = '';
     try {
       skillBody = stripFrontmatter(fs.readFileSync(PLANNER_SKILL_PATH, 'utf-8')).trim();
@@ -116,10 +120,11 @@ export class DelegationPlannerService {
       'You are a delegation planning specialist for a multi-agent hive.',
       'You receive a user request and the available agent roster. Produce ONLY a delegation tracking plan.',
       'Output MUST be valid JSON (no markdown, no preamble) with shape: {"steps":[{"destino":"<nickname>","accion":"...","entrega":"<nickname|solicitante>","stop":"..."}],"parada":"..."}',
-      'Use only exact nicknames from the roster for destino. Do not invent agents. Preserve the chain requested by the user (keep intermediaries; do not shortcut).',
+      'Use only exact nicknames from the ROSTER for "destino". Do not invent agents. Preserve the chain requested by the user (keep intermediaries; do not shortcut A→B→C).',
+      `IMPORTANT: the requester/origin (${requesterLabel || 'user/solicitante'}, not an agent) is NOT in the roster and must NEVER be used as "destino". Use a roster nickname for "destino". For "entrega"/"parada" you may refer to the requester/origin as "solicitante" or "user" (or the exact origin label given) to indicate the final delivery, but "destino" must always be an agent nickname from the roster.`,
       'Do not explore the environment, files, or code. `branch`/`depth`/`request`/`origin` are chain metadata, never filesystem paths.',
       '',
-      '[ROSTER]',
+      '[ROSTER (agentes disponibles; solo estos pueden ser destino)]',
       rosterText || '(sin otros agentes registrados)',
       '',
       '[SKILL-REFERENCE]',
@@ -129,15 +134,28 @@ export class DelegationPlannerService {
 
   async planOneShot(input: DelegationPlanInput): Promise<DelegationPlanResult> {
     const { model, runtime, userTask, roster, cwd } = input;
-    const timeoutMs = Math.max(5_000, Math.min(Number(input.timeoutMs || 45_000), 120_000));
+    // Dynamic timeout: extend while model activity is observed (load/processing/stream), up to hardMax.
+    const idleTimeoutMs = Math.max(5_000, Math.min(Number(input.idleTimeoutMs ?? input.timeoutMs ?? 45_000), 300_000));
+    const hardMaxMs = Math.max(idleTimeoutMs, Math.min(Number(input.hardMaxMs ?? 300_000), 300_000));
     const started = Date.now();
+    const requesterLabel = String(input.requesterLabel || 'user/solicitante').trim() || 'user/solicitante';
     const rosterText = (roster || []).map((a) => `- ${a.nickname}${a.role ? ` (${a.role})` : ''}${a.id ? ` id=${a.id}` : ''}`).join('\n');
-    const systemPrompt = this.buildSystemPrompt(rosterText);
+    const systemPrompt = this.buildSystemPrompt(rosterText, requesterLabel);
 
     const sessionManager = SessionManager.inMemory(cwd);
     let session: any;
     let resourceLoader: any;
+    let unsubscribe: (() => void) | undefined;
+    let watchdog: ReturnType<typeof setInterval> | undefined;
+    let lastActivity = started;
+    let firstActivityAt: number | null = null;
     const agentDir = path.join(process.cwd(), 'data', 'pi-agent');
+
+    const markActivity = () => {
+      const now = Date.now();
+      if (firstActivityAt == null) firstActivityAt = now;
+      lastActivity = now;
+    };
 
     try {
       try {
@@ -176,18 +194,53 @@ export class DelegationPlannerService {
         }
       } catch {}
 
-      const userMessage = `[USER REQUEST]\n${String(userTask || '').trim() || '(vacía)'}\n\n[INSTRUCTION]\nDevuelve únicamente JSON válido con el tracking: {"steps":[{"destino":"nickname_exacto","accion":"...","entrega":"...","stop":"..."}],"parada":"..."}. Sin texto extra.`;
-      const run = session.prompt(userMessage);
-      const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`planner_timeout_${timeoutMs}ms`)), timeoutMs));
-      await Promise.race([run, timeout]);
+      // Observe load/processing/stream activity to extend the idle timeout dynamically.
+      try {
+        if (typeof session?.subscribe === 'function') {
+          unsubscribe = session.subscribe((event: any) => {
+            const t = event?.type;
+            if (t === 'message_update' && event.assistantMessageEvent) {
+              const a = event.assistantMessageEvent?.type;
+              // text/thinking deltas and toolcall phases signal active processing
+              if (a === 'text_delta' || a === 'thinking_delta' || a === 'toolcall_start' || a === 'toolcall_end' || a === 'text_end' || a === 'thinking_end') {
+                markActivity();
+              }
+            } else if (t === 'tool_execution_start' || t === 'tool_execution_end' || t === 'tool_call' || t === 'agent_start' || t === 'agent_end' || t === 'message_start' || t === 'message_end' || t === 'turn_start' || t === 'turn_end' || t === 'auto_retry_start' || t === 'auto_retry_end') {
+              markActivity();
+            }
+          });
+        }
+      } catch {}
+
+      const userMessage = `[CONTEXT]\nSolicitante/origen (NO es un agente del roster, NO usar como destino): ${requesterLabel}\n\n[USER REQUEST]\n${String(userTask || '').trim() || '(vacía)'}\n\n[INSTRUCTION]\nDevuelve únicamente JSON válido con el tracking: {"steps":[{"destino":"nickname_exacto_del_roster","accion":"...","entrega":"nickname_del_roster_o_solicitante","stop":"..."}],"parada":"..."}. "destino" debe ser siempre un nickname exacto del ROSTER; el solicitante/origen nunca es destino. Sin texto extra.`;
+
+      const runPromise = session.prompt(userMessage);
+      const watchdogPromise = new Promise<never>((_, reject) => {
+        watchdog = setInterval(() => {
+          const now = Date.now();
+          if (now - started >= hardMaxMs) {
+            reject(new Error(`planner_timeout_max_${hardMaxMs}ms`));
+          } else if (now - lastActivity >= idleTimeoutMs) {
+            reject(new Error(`planner_timeout_idle_${idleTimeoutMs}ms`));
+          }
+        }, 1000);
+        (watchdog as any)?.unref?.();
+      });
+
+      await Promise.race([runPromise, watchdogPromise]);
 
       const out = typeof session.getLastAssistantText === 'function' ? session.getLastAssistantText() : undefined;
       const parsed = parsePlan(String(out || ''), roster || []);
-      if (parsed.ok === false) return { ok: false, reason: parsed.reason, plannerMs: Date.now() - started };
-      return { ok: true, plan: parsed.plan, steps: parsed.steps, parada: parsed.parada, plannerMs: Date.now() - started };
+      const plannerMs = Date.now() - started;
+      const firstActivityMs = firstActivityAt ? firstActivityAt - started : null;
+      if (parsed.ok === false) return { ok: false, reason: parsed.reason, plannerMs, firstActivityMs };
+      return { ok: true, plan: parsed.plan, steps: parsed.steps, parada: parsed.parada, plannerMs, firstActivityMs };
     } catch (e: any) {
-      return { ok: false, reason: `planner_error: ${e?.message || String(e)}`, plannerMs: Date.now() - started };
+      try { if (session?.abort) await session.abort().catch?.(() => {}); } catch {}
+      return { ok: false, reason: `planner_error: ${e?.message || String(e)}`, plannerMs: Date.now() - started, firstActivityMs: firstActivityAt ? firstActivityAt - started : null };
     } finally {
+      try { if (watchdog) clearInterval(watchdog); } catch {}
+      try { if (unsubscribe) unsubscribe(); } catch {}
       try { if (session?.dispose) session.dispose(); } catch {}
     }
   }

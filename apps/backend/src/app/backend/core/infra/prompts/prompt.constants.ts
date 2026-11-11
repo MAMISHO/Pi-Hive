@@ -3,6 +3,7 @@ export const PROMPTS_DIR = 'prompts';
 export const PROMPT_FILES = {
   SYSTEM_DEFAULT: 'system-default.md',
   CHIEF_DEFAULT: 'chief-default.md',
+  WORKER_COORDINATION: 'worker-coordination.md',
 } as const;
 
 export const PROMPT_IDS = {
