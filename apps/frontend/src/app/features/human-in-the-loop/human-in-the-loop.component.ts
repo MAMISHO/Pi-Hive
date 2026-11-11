@@ -8,6 +8,7 @@ import { TaskService } from '../../core/services/task.service';
 import { AgentSelectionService } from '../../core/services/agent-selection.service';
 import { WebsocketService } from '../../core/services/websocket.service';
 import { WorkspaceService } from '../../core/services/workspace.service';
+import { UiFeedbackService } from '../../core/services/ui-feedback.service';
 import { ITaskQueue } from '../../core/models/task.model';
 import { Subscription } from 'rxjs';
 
@@ -65,6 +66,7 @@ export class HumanInTheLoopComponent implements OnInit, OnDestroy {
     private readonly selection: AgentSelectionService,
     private readonly ws: WebsocketService,
     public readonly workspace: WorkspaceService,
+    private readonly feedback: UiFeedbackService,
   ) {}
 
   ngOnInit(): void {
@@ -88,9 +90,13 @@ export class HumanInTheLoopComponent implements OnInit, OnDestroy {
     );
   }
   pausar(task: ITaskQueue): void { if (this.hitlEnabled) this.taskService.updateStatus(task.id, 'HOLD').subscribe(() => this.load()); }
-  eliminar(task: ITaskQueue): void {
-    if (!confirm(`¿Eliminar tarea #${task.id}?`)) return;
-    (this.taskService as any).delete ? (this.taskService as any).delete(task.id).subscribe(() => this.load()) : fetch(`http://localhost:8090/tasks/${task.id}`,{method:'DELETE'}).then(()=>this.load());
+  async eliminar(task: ITaskQueue): Promise<void> {
+    const ok = await this.feedback.confirm({ title: 'Eliminar tarea', message: `¿Eliminar tarea #${task.id}?`, confirmLabel: 'Eliminar', danger: true });
+    if (!ok) return;
+    const done = () => { this.feedback.success(`Tarea #${task.id} eliminada.`); this.load(); };
+    const fail = () => this.feedback.error('No se pudo eliminar la tarea.');
+    if ((this.taskService as any).delete) (this.taskService as any).delete(task.id).subscribe({ next: done, error: fail });
+    else fetch(`http://localhost:8090/tasks/${task.id}`,{method:'DELETE'}).then(done).catch(fail);
   }
   short(id?: string | null): string { return id ? id.substring(0, 8) : 'user'; }
   severity(s: string): 'success'|'warn'|'danger'|'info'|'secondary' {

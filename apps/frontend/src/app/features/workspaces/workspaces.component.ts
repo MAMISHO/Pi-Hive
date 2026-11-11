@@ -5,6 +5,7 @@ import { DialogModule } from 'primeng/dialog';
 import { ButtonModule } from 'primeng/button';
 import { Router } from '@angular/router';
 import { WorkspaceService, IWorkspace } from '../../core/services/workspace.service';
+import { UiFeedbackService } from '../../core/services/ui-feedback.service';
 import { AgentService } from '../../core/services/agent.service';
 import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-prompts.service';
 
@@ -124,11 +125,11 @@ export class WorkspacesComponent implements OnInit {
   newPath=''; browseVisible=false; browseCurrent=''; browseParent:string|null=null; browseDirs:any[]=[];
   wsName=''; prompts: ISystemPrompt[]=[]; selectedPromptId='default-system-prompt';
   chiefNickname=''; modelProviders: Array<{provider:string;models:string[]}>=[]; selectedProvider=''; selectedModelId=''; chiefModel=''; chiefColor=this.randColor(); chiefInstruction=''; useCustomChiefPrompt=false; customChiefPrompt=''; hitlEnabled=false;
-  constructor(private ws: WorkspaceService, private agents: AgentService, private sp: SystemPromptsService, private router: Router) {}
+  constructor(private ws: WorkspaceService, private agents: AgentService, private sp: SystemPromptsService, private router: Router, private feedback: UiFeedbackService) {}
   ngOnInit(){ this.load(); this.agents.getModels().subscribe(m=>{this.modelProviders=(m as any)||[]; this.onProviderChange();}); }
   load(){ this.ws.getAll().subscribe(l=>this.workspaces=l); }
   openWorkspace(w:IWorkspace){ this.ws.activate(w.id).subscribe(()=>{ this.load(); this.router.navigateByUrl('/swarm-monitor'); }); }
-  deleteWorkspace(w:IWorkspace){ if(!confirm(`Eliminar workspace "${w.name}" (${w.path})? Esto eliminará sus agentes y tareas.`)) return; this.ws.delete(w.id).subscribe(()=>this.load()); }
+  async deleteWorkspace(w:IWorkspace){ const ok = await this.feedback.confirm({ title: 'Eliminar workspace', message: `Eliminar workspace "${w.name}" (${w.path})?\nEsto eliminará sus agentes y tareas.`, confirmLabel: 'Eliminar', danger: true }); if(!ok) return; this.ws.delete(w.id).subscribe({ next: ()=>{ this.feedback.success(`Workspace "${w.name}" eliminado.`); this.load(); }, error: ()=> this.feedback.error('No se pudo eliminar el workspace.') }); }
   openCreate(){ this.editWs=null; this.resetWizard(); this.wizardOpen=true; this.chiefNickname='Chief-'+Math.random().toString(36).slice(2,5); this.chiefColor=this.randColor(); this.prompts=[{id:'default-system-prompt',workspace_id:null,name:'Default Hive System Prompt',content:'',is_default:true}]; }
   openEdit(w:IWorkspace){ this.editWs=w; this.wizardOpen=true; this.wsName=w.name; this.hitlEnabled=!!w.hitl_enabled; this.selectedPromptId=w.active_system_prompt_id||'default-system-prompt'; }
   resetWizard(){ this.error=''; this.saving=false; this.newPath=''; this.browseVisible=false; this.wsName=''; this.chiefNickname=''; this.selectedProvider=''; this.selectedModelId=''; this.chiefModel=''; this.chiefInstruction=''; this.useCustomChiefPrompt=false; this.customChiefPrompt=''; this.hitlEnabled=false; }

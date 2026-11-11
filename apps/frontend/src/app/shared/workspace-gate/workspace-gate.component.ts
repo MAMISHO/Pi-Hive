@@ -4,6 +4,7 @@ import { FormsModule } from '@angular/forms';
 import { DialogModule } from 'primeng/dialog';
 import { ButtonModule } from 'primeng/button';
 import { WorkspaceService, IWorkspace } from '../../core/services/workspace.service';
+import { UiFeedbackService } from '../../core/services/ui-feedback.service';
 import { AgentService } from '../../core/services/agent.service';
 import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-prompts.service';
 
@@ -103,11 +104,11 @@ export class WorkspaceGateComponent implements OnInit {
   newPath = ''; browseVisible=false; browseCurrent=''; browseParent:string|null=null; browseDirs:any[]=[];
   wizardOpen=false; wsName=''; prompts: ISystemPrompt[]=[]; selectedPromptId='default-system-prompt';
   chiefNickname='Chief'; chiefModel=''; chiefColor=this.randColor(); chiefInstruction=''; useCustomChiefPrompt=false; customChiefPrompt=''; hitlEnabled=false; error=''; modelProviders: Array<{provider:string;models:string[]}>=[]; selectedProvider=""; selectedModelId="";
-  constructor(private ws: WorkspaceService, private agents: AgentService, private sp: SystemPromptsService) {}
+  constructor(private ws: WorkspaceService, private agents: AgentService, private sp: SystemPromptsService, private feedback: UiFeedbackService){}
   ngOnInit(){ this.ws.active$.subscribe(a=>{ this.visible=!a; if(this.visible) this.load(); }); this.load(); }
   load(){ this.ws.getAll().subscribe(l=>this.workspaces=l); this.agents.getModels().subscribe(m=>{this.modelProviders=(m as any)||[]; this.onProviderChange();}); }
   openWorkspace(w:IWorkspace){ this.ws.activate(w.id).subscribe(()=>{}); }
-  deleteWorkspace(w:IWorkspace){ if(!confirm(`Eliminar workspace "${w.name}" (${w.path})? Esto eliminará sus agentes y tareas.`)) return; this.ws.delete(w.id).subscribe(()=>this.load()); }
+  async deleteWorkspace(w:IWorkspace){ const ok = await this.feedback.confirm({ title: 'Eliminar workspace', message: `Eliminar workspace "${w.name}" (${w.path})?\nEsto eliminará sus agentes y tareas.`, confirmLabel: 'Eliminar', danger: true }); if(!ok) return; this.ws.delete(w.id).subscribe({ next: ()=>{ this.feedback.success(`Workspace "${w.name}" eliminado.`); this.load(); }, error: ()=> this.feedback.error('No se pudo eliminar el workspace.') }); }
   startNew(){ if(!this.newPath.trim()){ this.browseVisible=true; this.browse(this.browseCurrent||''); } else { this.openWizard(); } }
   browse(p:string){ this.ws.browseDirs(p||undefined).subscribe(r=>{ this.browseCurrent=r.current; this.browseParent=r.parent; this.browseDirs=r.dirs||[]; if(r.error) this.error=r.error; }); }
   useFolder(){ this.newPath=this.browseCurrent; this.browseVisible=false; this.openWizard(); }

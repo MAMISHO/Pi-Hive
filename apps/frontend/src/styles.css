@@ -1,3 +1,5 @@
+@import "primeicons/primeicons.css";
+
 /* Pi-Hive Design Tokens */
 :root {
   /* Colors - Dark TUI theme */
@@ -44,20 +46,21 @@ html, body {
 
 /* Status badge animations */
 @keyframes pulse-blue {
-  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(88, 166, 255, 0.45); }
-  50% { opacity: 0.85; box-shadow: 0 0 0 4px rgba(88, 166, 255, 0); }
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(88, 166, 255, 0.45); transform: scale(1); }
+  50% { opacity: 0.9; box-shadow: 0 0 0 5px rgba(88, 166, 255, 0); transform: scale(1.06); }
 }
 
 .status-dot {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   display: inline-block;
   flex-shrink: 0;
+  transition: background var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast);
 }
 
 .status-dot.working {
-  background: var(--accent-blue);
+  background: var(--agent-color, var(--accent-blue));
   animation: pulse-blue 1.4s ease-in-out infinite;
 }
 
