@@ -18,6 +18,8 @@ import { PromptBuilderService } from './prompt-builder.service.js';
 import { RunTraceService } from './run-trace.service.js';
 import { DelegationPlannerService } from './delegation-planner.service.js';
 import { DelegationPlanStore } from './delegation-plan.store.js';
+import { buildReceiverScopedInstruction } from './delegation-instruction.js';
+import { detectCopyPasteInstruction } from './delegation-instruction-guard.js';
 import { taskEventEmitter } from '../task-queue/infra/persistence/sequalize/entities/task-queue.schema.js';
 import { AgentStatus } from '../agent/domain/models/agent-status.enum.js';
 import { AgentSessionHistoryEntity } from '../session-history/infra/persistence/sequalize/entities/agent-session-history.schema.js';
@@ -326,26 +328,43 @@ export class AgentRunnerService implements OnModuleInit {
       if (activePlanRef == null) activePlanRef = await resolvePlanRefFromChain();
       const loadActivePlan = async () => (activePlanRef != null ? await planStore.get(activePlanRef) : null);
       let activePlan = await loadActivePlan();
-      if (activePlan && activePlan.state === 'active' && (task as any).task_flow === 'delegation_result') {
-        const cur = Math.max(0, Math.min(activePlan.cursor, Math.max(activePlan.steps.length - 1, 0)));
-        const step = activePlan.steps[cur];
-        if (step && step.status !== 'done') {
-          step.status = 'done';
-          step.result_ref = Number(task.id);
-          activePlan.cursor = cur + 1;
-          if (activePlan.cursor >= activePlan.steps.length) activePlan.state = 'done';
+      const markPlanProgressOnResult = async () => {
+        if (!activePlan || activePlan.state !== 'active' || (task as any).task_flow !== 'delegation_result') return;
+        const hasPending = (nodes: any[] | undefined): boolean => {
+          if (!nodes) return false;
+          for (const n of nodes) { const st = String(n.status || 'PENDING').toUpperCase(); if (st === 'PENDING' || st === 'IN_PROGRESS') return true; if (hasPending(n.children)) return true; }
+          return false;
+        };
+        const hasFailure = (nodes: any[] | undefined): boolean => {
+          if (!nodes) return false;
+          for (const n of nodes) { const st = String(n.status || '').toUpperCase(); if (st === 'FAILED' || st === 'BLOCKED') return true; if (hasFailure(n.children)) return true; }
+          return false;
+        };
+        const senderNick = String((task as any).sender_agent_id === 'user' ? 'user' : ((await identityResolverService.resolveById?.((task as any).sender_agent_id) as any)?.nickname || ''));
+        const norm = (s: string) => String(s || '').trim().toLowerCase();
+        // v2 (tree): advance only when the delegated node's target actually returned a FINAL result
+        const ownedPending = planStore.collectOwnedPending(activePlan.nodes, agent.nickname, []).filter((n: any) => !['DONE','SKIPPED','FAILED','BLOCKED'].includes(String(n.status || '').toUpperCase()));
+        let node = ownedPending.find((n: any) => n.delegate_to && senderNick && norm(n.delegate_to) === norm(senderNick));
+        // fallback: single pending owned node (conservative)
+        if (!node && ownedPending.length === 1) node = ownedPending[0];
+        if (node) {
+          if (node.delegate_to && senderNick && norm(node.delegate_to) !== norm(senderNick)) return;
+          node.status = 'DONE';
+          node.result_ref = Number(task.id);
+          if (!hasPending(activePlan.nodes)) activePlan.state = hasFailure(activePlan.nodes) ? 'failed' : 'done';
           await planStore.save(activePlan);
-          traceService.record({ ...runCtx, eventType: activePlan.state === 'done' ? 'plan_closed' : 'plan_step_advanced', eventData: { plan_ref: activePlanRef, cursor: activePlan.cursor, total: activePlan.steps.length, result_task: task.id } }).catch(() => {});
+          traceService.record({ ...runCtx, eventType: (activePlan.state === 'done' || activePlan.state === 'failed') ? 'plan_closed' : 'plan_step_advanced', eventData: { plan_ref: activePlanRef, node_id: node.id, owner: agent.nickname, result_task: task.id, from: senderNick || null, state: activePlan.state } }).catch(() => {});
         }
-      }
+      };
+      await markPlanProgressOnResult();
 
       const delegateTaskTool = defineTool({
         name: 'delegate_task',
         label: 'Delegate Task',
-        description: 'Delega una tarea a otro agente por nickname EXACTO (solo el alias, p.ej. "Bob"; NO uses "Bob (WORKER)"). Asíncrono: NO esperes/pollees; termina tu turno y el resultado llegará como [DELEGATION RESULT]. En "instruction" pasa el PLAN COMPLETO para el agente (sub-objetivos, qué debe hacer con su resultado y a quién devolverlo). NO uses delegate_task para reportar/informar resultados al solicitante o a quien te delegó: devuelve el resultado en tu respuesta y el runtime lo enruta.',
+        description: 'Delega una tarea a otro agente por nickname EXACTO (solo el alias, p.ej. "Bob"; NO uses "Bob (WORKER)"). Asíncrono: NO esperes/pollees; termina tu turno y el resultado llegará como [DELEGATION RESULT]. En "instruction" pasa SOLO el tramo del agente destino, reescrito en segunda persona: su acción concreta, el dato/entrada que necesita y la condición de entrega. NO copies el plan completo ni incluyas pasos de otros agentes; el tracking va aparte en [PLAN_SLICE]. NO le pidas al receptor reportar al usuario final: su respuesta se te entrega a ti automáticamente. NO uses delegate_task para reportar/informar resultados al solicitante o a quien te delegó: devuelve el resultado en tu respuesta y el runtime lo enruta.',
         parameters: Type.Object({
           target_agent_nickname: Type.String({ description: 'Nickname EXACTO del agente destino (solo alias, ej. "Pam"; sin sufijo de rol)' }),
-          instruction: Type.String({ description: 'Instrucción/plan completo para el agente destino' }),
+          instruction: Type.String({ description: 'SOLO el tramo del agente destino (acción, entrada y entrega); NO el plan completo ni pasos de otros' }),
         }),
         async execute(_toolCallId, params) {
           const target = await identityResolverService.resolveNickname(params.target_agent_nickname, workspaceId);
@@ -363,7 +382,9 @@ export class AgentRunnerService implements OnModuleInit {
             return { content: [{ type: 'text' as const, text: `Callback [DELEGATION PROGRESS] (state=PROGRESS, request en curso): registra el avance y espera el [DELEGATION RESULT] final de esa request/branch; no delegues ni crees tareas en esta subcadena.` }], details: { taskId: 0 } };
           }
           if (!isFinalResultCb && target.id === senderOfThisTask && senderOfThisTask !== 'user') {
-            return { content: [{ type: 'text' as const, text: `No delegues al remitente (${params.target_agent_nickname}) para reportar. Devuelve el resultado en tu respuesta; el runtime lo enruta.` }], details: { taskId: 0 } };
+            const senderNick = sender?.nickname || params.target_agent_nickname;
+            const text = `Delegación bloqueada: ${senderNick} es el remitente de esta solicitud y ya te pidió lo que necesita. No delegues al remitente: crearías una orden nueva y un eco. Responde en ESTE turno, de forma directa y concisa, el dato/acción que ${senderNick} espera de ti; el runtime entregará tu respuesta a ${senderNick} como [DELEGATION RESULT]. Si para completar tu parte necesitas la acción de un TERCERO distinto de ${senderNick}, delega solo a ese tercero.`;
+            return { content: [{ type: 'text' as const, text }], details: { taskId: 0, blocked: true, reason: 'reply_to_sender_echo', expected: 'answer_directly', deliver_as: 'delegation_result', sender: senderNick } } as any;
           }
           // F5: depth/cycle guard
           const nextDepth = parentDepth + 1;
@@ -373,19 +394,40 @@ export class AgentRunnerService implements OnModuleInit {
 
           // Plan-aware validation (only when an active structured plan exists for this branch)
           let planDeviation: string | null = null;
+          let plannedNodeForDelegation: any | null = null;
           if (activePlanRef != null) {
             const p = await loadActivePlan();
-            if (p && p.state === 'active' && p.steps && p.steps.length) {
-              const cur = Math.max(0, Math.min(p.cursor, Math.max(p.steps.length - 1, 0)));
-              const step = p.steps[cur];
-              if (step) {
-                const norm = (s: string) => String(s || '').trim().toLowerCase();
-                if (norm(step.destino) && norm(step.destino) !== norm(target.nickname)) {
-                  planDeviation = `El tracking (plan_ref=${p.plan_ref}, paso ${cur + 1}/${p.steps.length}) exige destino "${step.destino}"; intentaste delegar a "${target.nickname}". Ejecuta el paso indicado (respeta intermediarios) o ajusta la instrucción al paso actual.`;
-                  traceService.record({ ...runCtx, eventType: 'plan_deviation', eventData: { plan_ref: p.plan_ref, cursor: cur + 1, expected: step.destino, attempted: target.nickname } }).catch(() => {});
-                  return { content: [{ type: 'text' as const, text: `Delegación bloqueada por tracking: ${planDeviation}` }], details: { taskId: 0, blocked: true } } as any;
-                }
+            if (p && p.state === 'active' && p.nodes?.length) {
+              const norm = (s: string) => String(s || '').trim().toLowerCase();
+              const owned = planStore.collectOwnedPending(p.nodes, agent.nickname, []).filter((n: any) => !['DONE','SKIPPED','FAILED','BLOCKED'].includes(String(n.status || '').toUpperCase()));
+              const node = owned[0];
+              if (!node) {
+                planDeviation = `El tracking (plan_ref=${p.plan_ref}) no tiene nodos pendientes para ${agent.nickname} en este tramo.`;
+                return { content: [{ type: 'text' as const, text: `Delegación bloqueada por tracking: ${planDeviation}` }], details: { taskId: 0, blocked: true } } as any;
               }
+              if (!node.delegate_to) {
+                planDeviation = `El tracking (plan_ref=${p.plan_ref}, nodo ${node.id}) es acción propia de ${agent.nickname} (sin delegación). Ejecuta la acción del nodo y entrega el resultado.`;
+                traceService.record({ ...runCtx, eventType: 'plan_deviation', eventData: { plan_ref: p.plan_ref, node_id: node.id, expected: 'local_action', attempted: target.nickname } }).catch(() => {});
+                return { content: [{ type: 'text' as const, text: `Delegación bloqueada por tracking: ${planDeviation}` }], details: { taskId: 0, blocked: true } } as any;
+              }
+              if (norm(node.delegate_to) !== norm(target.nickname)) {
+                planDeviation = `El tracking (plan_ref=${p.plan_ref}, nodo ${node.id}) exige delegar a "${node.delegate_to}"; intentaste delegar a "${target.nickname}". Ejecuta el nodo indicado (respeta cadena/intermediarios).`;
+                traceService.record({ ...runCtx, eventType: 'plan_deviation', eventData: { plan_ref: p.plan_ref, node_id: node.id, expected: node.delegate_to, attempted: target.nickname } }).catch(() => {});
+                return { content: [{ type: 'text' as const, text: `Delegación bloqueada por tracking: ${planDeviation}` }], details: { taskId: 0, blocked: true } } as any;
+              }
+              plannedNodeForDelegation = node;
+            }
+          }
+
+          if (!plannedNodeForDelegation) {
+            const guard = detectCopyPasteInstruction({
+              instruction: params.instruction,
+              delegatorNickname: agent.nickname,
+              targetNickname: target.nickname,
+            });
+            if (guard.blocked) {
+              traceService.record({ ...runCtx, eventType: 'delegation_instruction_blocked', eventData: { target: target.nickname, reasons: guard.reasons } }).catch(() => {});
+              return { content: [{ type: 'text' as const, text: guard.message || 'Delegación bloqueada: reescribe solo el tramo del receptor.' }], details: { taskId: 0, blocked: true, reason: 'instruction_role_leak', target: target.nickname, patterns: guard.reasons } } as any;
             }
           }
 
@@ -396,7 +438,27 @@ export class AgentRunnerService implements OnModuleInit {
           const originTag = originForHeader ? `${originForHeader.nickname}${originForHeader.role ? `(${originForHeader.role})` : ''}` : 'unknown';
           const rootTag = originCtx?.rootTaskId ? `origin=#${originCtx.rootTaskId}` : `origin=#${task.id}`;
           const reqTag = originCtx?.requestId ? `request=#${originCtx.requestId}` : `request=#${task.id}`;
-          const delegatedPayload = `[DELEGATION | from=${agent.nickname}(${agent.role}, id=${agent.id}) | to=${target.nickname}(${target.role}) | task->new | ${reqTag} | ${rootTag} | parent=#${currentTaskId} | depth=${nextDepthCapped} | branch=${nextBranch} | chain_origin=${originTag}]\n${params.instruction}`;
+          const deterministicInstruction = plannedNodeForDelegation
+            ? buildReceiverScopedInstruction({
+                delegatorNickname: agent.nickname,
+                delegatorRole: agent.role,
+                targetNickname: target.nickname,
+                targetRole: target.role,
+                node: plannedNodeForDelegation,
+                requester: originCtx?.origin?.nickname || null,
+              })
+            : null;
+          const instructionForTarget = deterministicInstruction ?? params.instruction;
+          traceService.record({ ...runCtx, eventType: 'delegation_instruction_selected', eventData: { target: target.nickname, source: deterministicInstruction ? 'plan_node' : 'free_text', plan_ref: effectivePlanRef, node_id: plannedNodeForDelegation?.id || null } }).catch(() => {});
+          // attach the deterministic slice/subplan for the delegated agent (partition by depth)
+          let planSlice = '';
+          if (effectivePlanRef != null) {
+            const pForSlice = await loadActivePlan();
+            if (pForSlice && pForSlice.nodes?.length) {
+              planSlice = '\n\n[PLAN_SLICE · tu parte asignada, todos PENDING, ejecuta en orden el primero pendiente]\n' + planStore.formatForAgent(pForSlice, target.nickname, nextDepthCapped);
+            }
+          }
+          const delegatedPayload = `[DELEGATION | from=${agent.nickname}(${agent.role}, id=${agent.id}) | to=${target.nickname}(${target.role}) | task->new | ${reqTag} | ${rootTag} | parent=#${currentTaskId} | depth=${nextDepthCapped} | branch=${nextBranch} | chain_origin=${originTag}]\n${instructionForTarget}${planSlice}`;
           const newTask = await taskQueueRepository.add({
             sender_agent_id: senderAgentId,
             receiver_agent_id: target.id,
@@ -434,9 +496,16 @@ export class AgentRunnerService implements OnModuleInit {
           delegationPlannedThisRun = true;
           if (activePlanRef != null) {
             const existing = await loadActivePlan();
-            if (existing) {
-              return { content: [{ type: 'text' as const, text: `Ya existe un tracking activo para esta rama (plan_ref=${activePlanRef}). Síguelo paso a paso:\n${planStore.formatForPrompt(existing)}` }], details: { ok: true, plan_ref: activePlanRef, steps: existing.steps.length } } as any;
+            // Reuse only if it's an active v2 plan for this branch; never reuse terminal/legacy plans
+            const reusable = !!(existing && existing.state === 'active' && existing.nodes?.length);
+            if (reusable) {
+              const view = planStore.formatForAgent(existing!, agent.nickname, Number((task as any).depth ?? 0));
+              const count = existing!.nodes.length;
+              return { content: [{ type: 'text' as const, text: `Ya existe un tracking activo para esta rama (plan_ref=${activePlanRef}). Síguelo paso a paso:\n${view}` }], details: { ok: true, plan_ref: activePlanRef, steps: count } } as any;
             }
+            // incompatible/terminal/legacy plan: drop association and create a fresh plan for this task
+            activePlanRef = null;
+            (task as any).plan_ref = null;
           }
           const plannerInputTask = String(params.user_task || '').trim() || String((task as any).callback_context || task.payload || '').trim();
           try {
@@ -455,14 +524,18 @@ export class AgentRunnerService implements OnModuleInit {
             });
             const plannerMs = res.plannerMs ?? 0;
             const plannerModel = agentModelRaw;
-            if (!res.ok || !res.plan || !res.steps || !res.steps.length) {
-              traceService.record({ ...runCtx, eventType: 'delegation_planned', eventData: { ok: false, reason: (res as any).reason || 'invalid_plan', plannerMs, plannerModel, steps: 0 } }).catch(() => {});
-              return { content: [{ type: 'text' as const, text: `No se pudo generar el plan de delegación (${(res as any).reason || 'plan inválido'}). Continúa con tu propio criterio: si la tarea requiere coordinación, delega el siguiente paso concreto con nickname exacto e instrucción completa.` }], details: { ok: false, reason: (res as any).reason } } as any;
+            const firstActivityMs = (res as any).firstActivityMs ?? null;
+            const reasonDetail = (res as any).reason_detail ?? null;
+            const debug = (res as any).debug ?? null;
+            if (!res.ok || res.schema !== 'v2' || !Array.isArray(res.nodes) || res.nodes.length === 0) {
+              traceService.record({ ...runCtx, eventType: 'delegation_planned', eventData: { ok: false, reason: (res as any).reason || 'invalid_plan', reason_detail: reasonDetail, plannerMs, firstActivityMs, plannerModel, steps: 0, schema: (res as any).schema || null, debug } }).catch(() => {});
+              return { content: [{ type: 'text' as const, text: `No se pudo generar el plan de delegación (${(res as any).reason || 'plan inválido'}). Continúa con tu propio criterio: si la tarea requiere coordinación, delega el siguiente paso concreto con nickname exacto e instrucción del tramo del receptor (no el plan completo).` }], details: { ok: false, reason: (res as any).reason, reason_detail: reasonDetail, plannerMs, firstActivityMs, debug } } as any;
             }
             activePlanRef = Number(currentTaskId);
             (task as any).plan_ref = activePlanRef;
             try { await taskQueueRepository.update(task as any); } catch {}
             const planText = String(res.plan).trim();
+            const countSteps = res.nodes.length;
             await planStore.create({
               plan_ref: activePlanRef,
               root_task_id: Number(currentTaskId),
@@ -470,8 +543,9 @@ export class AgentRunnerService implements OnModuleInit {
               owner_agent_id: agent.id,
               requester: (task as any).sender_agent_id === 'user' ? 'user' : String((task as any).sender_agent_id || 'unknown'),
               raw_text: planText,
-              steps: res.steps,
-              parada: (res as any).parada ?? null,
+              schema: 'v2',
+              nodes: res.nodes,
+              parada: res.parada ?? null,
               cursor: 0,
               state: 'active',
             });
@@ -486,13 +560,14 @@ export class AgentRunnerService implements OnModuleInit {
               group_id: groupId,
               seq: null,
               content: planText,
-              meta: { plan_ref: activePlanRef, steps: res.steps.length, plannerMs, plannerModel, structured: true },
+              meta: { plan_ref: activePlanRef, steps: countSteps, schema: 'v2', plannerMs, firstActivityMs, plannerModel, structured: true, debug },
             } as any).catch(() => {});
-            traceService.record({ ...runCtx, eventType: 'delegation_planned', eventData: { ok: true, plannerMs, plannerModel, steps: res.steps.length, plan_ref: activePlanRef, structured: true } }).catch(() => {});
-            return { content: [{ type: 'text' as const, text: `Delegation tracking (sigue este plan paso a paso; respeta PARADA):\n${planStore.formatForPrompt(activePlan!)}` }], details: { ok: true, plan_ref: activePlanRef, steps: res.steps.length } } as any;
+            traceService.record({ ...runCtx, eventType: 'delegation_planned', eventData: { ok: true, plannerMs, firstActivityMs, plannerModel, steps: countSteps, schema: 'v2', plan_ref: activePlanRef, structured: true, debug } }).catch(() => {});
+            const view = activePlan ? planStore.formatForAgent(activePlan, agent.nickname, Number((task as any).depth ?? 0)) : planText;
+            return { content: [{ type: 'text' as const, text: `Delegation tracking (sigue este plan; respeta PARADA; todos los nodos inician PENDING):\n${view}` }], details: { ok: true, plan_ref: activePlanRef, steps: countSteps, schema: 'v2', plannerMs, firstActivityMs, debug } } as any;
           } catch (e: any) {
-            traceService.record({ ...runCtx, eventType: 'delegation_planned', eventData: { ok: false, reason: e?.message || String(e), plannerModel: agentModelRaw } }).catch(() => {});
-            return { content: [{ type: 'text' as const, text: `Fallo al planificar delegación (${e?.message || e}). Continúa con tu propio criterio y delega con nicknames exactos si hace falta.` }], details: { ok: false } } as any;
+            traceService.record({ ...runCtx, eventType: 'delegation_planned', eventData: { ok: false, reason: e?.message || String(e), reason_detail: 'tool_exception', plannerModel: agentModelRaw } }).catch(() => {});
+            return { content: [{ type: 'text' as const, text: `Fallo al planificar delegación (${e?.message || e}). Continúa con tu propio criterio y delega con nicknames exactos si hace falta.` }], details: { ok: false, reason: e?.message || String(e), reason_detail: 'tool_exception' } } as any;
           }
         },
       });
@@ -566,7 +641,9 @@ export class AgentRunnerService implements OnModuleInit {
       };
       const originCtx = await resolveOriginContext();
       activePlan = await loadActivePlan();
-      const activePlanBlock = activePlan ? planStore.formatForPrompt(activePlan) : null;
+      const activePlanBlock = activePlan
+        ? (activePlan.schema === 'v2' ? planStore.formatForAgent(activePlan, agent.nickname, Number((task as any).depth ?? 0)) : planStore.formatForPrompt(activePlan))
+        : null;
       const promptText = await this.promptBuilder.build({
         agent,
         taskPayload: task.payload,
@@ -638,6 +715,9 @@ export class AgentRunnerService implements OnModuleInit {
       let lastErrorMessage: string | null = null;
       let thinkPhase = 0;
       let toolSeq = 0;
+      let toolCallsTotal = 0;
+      let retryNudged = false;
+      let discardStreamingEvents = false;
 
       const flushThinking = async () => {
         if (!thinkBuf) return;
@@ -675,31 +755,57 @@ export class AgentRunnerService implements OnModuleInit {
       const unsubscribe = session.subscribe((event: any) => {
         if (event.type === 'message_update' && event.assistantMessageEvent) {
           const ame = event.assistantMessageEvent;
-          if (ame.type === 'text_delta' && ame.delta) { flushThinking().catch(() => {}); assistantText += ame.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: ame.delta, kind: 'text', emittedAt: Date.now() }); this.trace.textOutput(runId, agent.id, workspaceId, task.id, ame.delta.length).catch(() => {}); }
-          if (ame.type === 'thinking_delta' && ame.delta) { thinkBuf += ame.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: ame.delta, kind: 'thinking', emittedAt: Date.now() }); this.trace.thinking(runId, agent.id, workspaceId, task.id, ame.delta.length).catch(() => {}); }
-          if (ame.type === 'toolcall_start') { const tc = ame.toolCall || {}; flushThinking().catch(() => {}); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(tc.name || ''), JSON.stringify(tc.arguments||'')).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'start', toolName: tc.name, toolCallId: tc.id, args: tc.arguments, emittedAt: Date.now() }); saveToolEvent('start', { toolName: tc.name, toolCallId: tc.id, args: tc.arguments }).catch(() => {}); }
-          if (ame.type === 'toolcall_end') { const tc = ame.toolCall || {}; agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'call', toolName: tc.name, toolCallId: tc.id, args: tc.arguments, emittedAt: Date.now() }); saveToolEvent('call', { toolName: tc.name, toolCallId: tc.id, args: tc.arguments }).catch(() => {}); }
+          if (ame.type === 'text_delta' && ame.delta) { if (discardStreamingEvents) return; flushThinking().catch(() => {}); assistantText += ame.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: ame.delta, kind: 'text', emittedAt: Date.now() }); this.trace.textOutput(runId, agent.id, workspaceId, task.id, ame.delta.length).catch(() => {}); }
+          if (ame.type === 'thinking_delta' && ame.delta) { if (discardStreamingEvents) return; thinkBuf += ame.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: ame.delta, kind: 'thinking', emittedAt: Date.now() }); this.trace.thinking(runId, agent.id, workspaceId, task.id, ame.delta.length).catch(() => {}); }
+          if (ame.type === 'toolcall_start') { const tc = ame.toolCall || {}; if (discardStreamingEvents) return; toolCallsTotal++; flushThinking().catch(() => {}); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(tc.name || ''), JSON.stringify(tc.arguments||'')).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'start', toolName: tc.name, toolCallId: tc.id, args: tc.arguments, emittedAt: Date.now() }); saveToolEvent('start', { toolName: tc.name, toolCallId: tc.id, args: tc.arguments }).catch(() => {}); }
+          if (ame.type === 'toolcall_end') { const tc = ame.toolCall || {}; if (discardStreamingEvents) return; agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'call', toolName: tc.name, toolCallId: tc.id, args: tc.arguments, emittedAt: Date.now() }); saveToolEvent('call', { toolName: tc.name, toolCallId: tc.id, args: tc.arguments }).catch(() => {}); }
           if (ame.error) { runError = String(ame.error?.message || ame.error); lastErrorMessage = runError; }
         }
-        if (event.type === 'text_delta' && event.delta) { flushThinking().catch(() => {}); assistantText += event.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: event.delta, kind: 'text', emittedAt: Date.now() }); }
-        if (event.type === 'tool_execution_start') { flushThinking().catch(() => {}); const s = JSON.stringify({ tool: event.toolName, args: event.args }); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(event.toolName||''), s).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'start', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); saveToolEvent('start', { toolName: event.toolName, toolCallId: event.toolCallId, args: event.args }).catch(() => {}); }
-        if (event.type === 'tool_execution_end') { const resultSummaryFull = toResultSummary(event.result); this.trace.toolResult(runId, agent.id, workspaceId, task.id, String(event.toolName||''), !!event.isError, resultSummaryFull.length).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: event.isError ? 'error' : 'end', toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: event.isError ? resultSummaryFull.slice(0, 300) : undefined, emittedAt: Date.now() }); saveToolEvent(event.isError ? 'error' : 'end', { toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: resultSummaryFull, isError: !!event.isError }).catch(() => {}); }
-        if (event.type === 'tool_call' && event.toolName) { flushThinking().catch(() => {}); const s = JSON.stringify({ tool: event.toolName, args: event.args }); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(event.toolName||''), s).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'call', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); saveToolEvent('call', { toolName: event.toolName, toolCallId: event.toolCallId, args: event.args }).catch(() => {}); }
+        if (event.type === 'text_delta' && event.delta) { if (discardStreamingEvents) return; flushThinking().catch(() => {}); assistantText += event.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: event.delta, kind: 'text', emittedAt: Date.now() }); }
+        if (event.type === 'tool_execution_start') { if (discardStreamingEvents) return; toolCallsTotal++; flushThinking().catch(() => {}); const s = JSON.stringify({ tool: event.toolName, args: event.args }); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(event.toolName||''), s).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'start', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); saveToolEvent('start', { toolName: event.toolName, toolCallId: event.toolCallId, args: event.args }).catch(() => {}); }
+        if (event.type === 'tool_execution_end') { if (discardStreamingEvents) return; const resultSummaryFull = toResultSummary(event.result); this.trace.toolResult(runId, agent.id, workspaceId, task.id, String(event.toolName||''), !!event.isError, resultSummaryFull.length).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: event.isError ? 'error' : 'end', toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: event.isError ? resultSummaryFull.slice(0, 300) : undefined, emittedAt: Date.now() }); saveToolEvent(event.isError ? 'error' : 'end', { toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: resultSummaryFull, isError: !!event.isError }).catch(() => {}); }
+        if (event.type === 'tool_call' && event.toolName) { if (discardStreamingEvents) return; toolCallsTotal++; flushThinking().catch(() => {}); const s = JSON.stringify({ tool: event.toolName, args: event.args }); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(event.toolName||''), s).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'call', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); saveToolEvent('call', { toolName: event.toolName, toolCallId: event.toolCallId, args: event.args }).catch(() => {}); }
         if (event.type === 'agent_end') { willRetry = !!event.willRetry; pickAssistantMeta(event); flushThinking().catch(() => {}); }
         if (event.type === 'agent_settled') { settledAborted = !!event.aborted; }
         if (event.type === 'auto_retry_start') { willRetry = true; agentEventEmitter.emit('agent:run:warning', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'auto_retry', message: `retry ${event.attempt ?? ''}`, emittedAt: Date.now() }); }
         if (event.type === 'auto_retry_end' && !event.success) { runError = runError || String(event.finalError || 'retry failed'); }
       });
 
-      try {
-        await session.prompt(promptText);
-      } catch (e: any) {
-        runError = runError || String(e?.message || e);
-        console.error(`[AgentRunner] prompt error task=${task.id} run=${runId}:`, e);
-      }
-      console.log(`[AgentRunner] prompt finished task=${task.id} run=${runId} stopReason=${lastStopReason} err=${runError || lastErrorMessage || ''} aborted=${settledAborted} retry=${willRetry}`);
-      await flushThinking();
+      const runPromptOnce = async (text: string) => {
+        assistantText = '';
+        thinkBuf = '';
+        runError = null;
+        lastStopReason = null;
+        lastErrorMessage = null;
+        willRetry = false;
+        settledAborted = false;
+        try {
+          await session.prompt(text);
+        } catch (e: any) {
+          runError = runError || String(e?.message || e);
+          console.error(`[AgentRunner] prompt error task=${task.id} run=${runId}:`, e);
+        }
+        await flushThinking();
+      };
+
+      await runPromptOnce(promptText);
+      let text = assistantText.trim();
       stopped = !this.activeSessions.has(agent.id) || settledAborted;
+      // Guard: model exhausted output (stopReason=length) with no actionable result and no delegation -> 1 concise nudge retry
+      if (!stopped && !runError && !lastErrorMessage && lastStopReason !== 'error' && lastStopReason === 'length' && !text && !delegatedThisRun) {
+        retryNudged = true;
+        console.warn(`[AgentRunner] output_length_no_action task=${task.id} run=${runId} agent=${agent.nickname} (nudging once)`);
+        this.trace.record({ runId, agentId: agent.id, eventType: 'output_length_no_action', taskId: task.id, workspaceId, eventData: { delegatedThisRun, toolCallsTotal, retry: true } }).catch(() => {});
+        agentEventEmitter.emit('agent:run:warning', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'output_length_no_action', message: 'Turn hit length limit with no action; retrying once with concise nudge', emittedAt: Date.now() });
+        // discard any late straggler events from the truncated turn while we nudge
+        discardStreamingEvents = true;
+        thinkBuf = '';
+        discardStreamingEvents = false;
+        await runPromptOnce(`[SYSTEM NUDGE · reintento automático]\nTu turno anterior se cortó por límite de longitud SIN completar ninguna acción ni respuesta. Responde AHORA de forma concisa y directa, en 1-2 líneas: ejecuta tu primer acto (plan_delegation si la tarea requiere cadena, o delegate_task al responsable directo, o entrega el resultado solicitado). NO repitas razonamiento ni expliques lo que vas a hacer, actúa.`);
+        text = assistantText.trim();
+        stopped = !this.activeSessions.has(agent.id) || settledAborted;
+      }
+      console.log(`[AgentRunner] prompt finished task=${task.id} run=${runId} stopReason=${lastStopReason} err=${runError || lastErrorMessage || ''} aborted=${settledAborted} retry=${willRetry} nudged=${retryNudged} delegated=${delegatedThisRun}`);
       this.activeSessions.delete(agent.id);
       unsubscribe();
 
@@ -734,10 +840,25 @@ export class AgentRunnerService implements OnModuleInit {
         }
 
         const sessionFile = (session as any).sessionManager?.getSessionFile?.() ?? agent.current_session_id;
-        const text = assistantText.trim();
-        const responseText = text || `(no text output, stopReason=${lastStopReason || 'unknown'})`;
-        const outcome = text ? 'completed' : 'completed_empty';
-        if (!text) console.warn(`[AgentRunner] empty response task=${task.id} run=${runId} model=${resolved.raw} stopReason=${lastStopReason}`);
+        const lengthNoAction = lastStopReason === 'length' && !text && !delegatedThisRun;
+        if (lengthNoAction) {
+          // exhausted output without any actionable result even after nudge: don't route/pretend success, don't poison memory
+          const msg = '⚠️ El turno se cortó por límite de longitud sin completar acción ni respuesta (posible bucle de razonamiento). Tarea en espera para reintento; considera limpiar/reiniciar la sesión del agente si persiste.';
+          task.status = 'HOLD' as any;
+          (task as any).response = msg;
+          await this.taskQueueRepository.update(task);
+          await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', msg, groupId).catch(() => {});
+          this.trace.error(runId, agent.id, workspaceId, task.id, 'output_length_exhausted_no_action', JSON.stringify({ stopReason: lastStopReason, delegatedThisRun, toolCallsTotal, nudged: retryNudged })).catch(() => {});
+          this.trace.close(runId, agent.id, workspaceId, task.id, 'output_length_no_action', lastStopReason || undefined, durationMs, false).catch(() => {});
+          agentEventEmitter.emit('agent:run:warning', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'output_length_exhausted_no_action', message: 'Exhausted length with no action/response after retry', emittedAt: Date.now() });
+          agentEventEmitter.emit('agent:run:finished', { agentId: agent.id, workspaceId, taskId: task.id, runId, outcome: 'error', stopReason: lastStopReason, errorMessage: 'output_length_exhausted_no_action', willRetry: false, aborted: false, durationMs, emittedAt: Date.now() });
+          agent.current_session_id = sessionFile ? String(sessionFile) : agent.current_session_id;
+          return;
+        }
+
+        const responseText = text || (delegatedThisRun ? '(delegación en curso; sin texto adicional)' : `(no text output, stopReason=${lastStopReason || 'unknown'})`);
+        const outcome = text ? 'completed' : (delegatedThisRun ? 'delegated' : 'completed_empty');
+        if (!text && !delegatedThisRun) console.warn(`[AgentRunner] empty response task=${task.id} run=${runId} model=${resolved.raw} stopReason=${lastStopReason}`);
         const summaryText = responseText.slice(0, 500);
         await this.agentMemoryRepository.add({ agent_id: agent.id, session_id: String(sessionFile || ''), compacted_summary: summaryText, created_at: new Date() } as any);
         await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', responseText, groupId).catch(() => {});

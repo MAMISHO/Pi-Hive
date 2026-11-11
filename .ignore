@@ -1,0 +1,35 @@
+# OpenCode / ripgrep ignore patterns to reduce unnecessary context & token usage
+
+# Dependencies & package manager artifacts
+node_modules/
+.pnpm-store/
+
+# Build outputs & caches
+dist/
+out-tsc/
+coverage/
+.nx/
+.angular/
+.cache/
+tmp/
+
+# Data / local state (large or irrelevant to code tasks)
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.log
+
+# Lockfiles (large, low-signal for most code edits)
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# IDE/editor
+.vscode/
+.idea/
+.DS_Store
+
+# Git internals
+.git/

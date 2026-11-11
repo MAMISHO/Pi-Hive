@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "AGENTS.md"
+  ],
+  "watcher": {
+    "ignore": [
+      "node_modules/**",
+      "dist/**",
+      ".nx/**",
+      ".angular/**",
+      "coverage/**",
+      "tmp/**",
+      "data/**",
+      "**/*.sqlite",
+      "**/*.sqlite3",
+      "**/*.db",
+      "**/*.log",
+      "package-lock.json",
+      ".git/**"
+    ]
+  }
+}
