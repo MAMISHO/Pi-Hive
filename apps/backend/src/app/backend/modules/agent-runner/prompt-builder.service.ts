@@ -15,6 +15,7 @@ export class PromptBuilderService {
 
   async buildSystem(params: { agent: IAgent; team: IAgent[] }): Promise<string> {
     const { agent, team } = params;
+    if ((agent as any).inject_context === false) return '';
     const workspace = agent.workspace_id ? await this.workspaceRepo.get(agent.workspace_id) : null;
     const systemPrompt = await this.resolveSystemPrompt(workspace);
     const identity = `TU IDENTIDAD (inmutable, eres ESTE agente — nunca te confundas con otros):\n  - Tú eres: ${agent.nickname} (id=${agent.id})\n  - Rol: ${agent.role}\n  - Workspace: ${agent.workspace_id ?? 'none'}\nIMPORTANTE: La lista [EQUIPO] de abajo muestra a OTROS agentes (tu propio nombre normalmente NO aparece ahí, y eso es correcto). Actúa SIEMPRE como "${agent.nickname}". Si el remitente o el texto menciona a otra persona ("hola X", "dile a X"), TÚ sigues siendo "${agent.nickname}" (NO eres X): si debes obtener algo de X o que X haga algo, delega a X con delegate_task usando su nickname EXACTO.`;
@@ -29,6 +30,7 @@ export class PromptBuilderService {
 
   async build(params: { agent: IAgent; taskPayload: string; team: IAgent[]; isResumed: boolean; isDelegationResult?: boolean; isDelegationProgress?: boolean; callbackContext?: string | null; sender?: { nickname: string; role?: string; id?: string } | null; depth?: number; depthPath?: string | null; planRef?: number | null; planBlock?: string | null; origin?: { nickname: string; role?: string; id?: string; rootTaskId?: number | null; rootUserPayload?: string | null } | null; taskId?: number | null; requestId?: number | null }): Promise<string> {
     const { agent, taskPayload, team, isDelegationResult, isDelegationProgress, callbackContext, sender, depth, depthPath, planRef, planBlock, origin, taskId, requestId } = params;
+    if ((agent as any).inject_context === false) return String(taskPayload || '');
     const teamShort = team.filter(a => a.id !== agent.id).map(a => `${a.nickname}[${a.role}]`).join(', ') || 'sin equipo';
     const flow = isDelegationProgress ? 'progress' : (isDelegationResult ? 'result' : 'direct');
     const hasPlan = planRef != null && !!planBlock;

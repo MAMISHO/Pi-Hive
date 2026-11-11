@@ -26,6 +26,13 @@ import { CreateAgentModalComponent } from '../create-agent-modal/create-agent-mo
         @for (agent of chiefAgents; track agent.id) {
           <div class="agent-card" [class.selected]="selectedId === agent.id" (click)="select(agent)">
             <span class="status-dot" [class]="statusClass(agent.status)" [class.is-active]="isActive(agent)" [style.--agent-color]="agent.color || statusBg(agent)"></span>
+            <span class="agent-kind" [class.independent]="!hasContext(agent)" [title]="hasContext(agent) ? 'Agente con contexto de equipo' : 'Agente independiente (sin contexto)'">
+              @if (hasContext(agent)) {
+                <svg viewBox="0 0 16 16" aria-hidden="true" class="kind-icon hive"><polygon points="8,1.5 12.8,4.2 12.8,9.8 8,12.5 3.2,9.8 3.2,4.2" /><polygon points="3.2,1 5.6,2.4 5.6,5 3.2,6.4 0.8,5 0.8,2.4" transform="translate(1.2,0.2) scale(0.7)" /><polygon points="12.8,1 15.2,2.4 15.2,5 12.8,6.4 10.4,5 10.4,2.4" transform="translate(-0.4,0.2) scale(0.7)" /></svg>
+              } @else {
+                <svg viewBox="0 0 16 16" aria-hidden="true" class="kind-icon bot"><rect x="3" y="5" width="10" height="7" rx="2" /><circle cx="6" cy="8.5" r="1" /><circle cx="10" cy="8.5" r="1" /><path d="M8 3v2M5.5 12v1.5M10.5 12v1.5M1.8 8.5h1.2M13 8.5h1.2" /></svg>
+              }
+            </span>
             <div class="agent-info">
               <div class="name-row"><span class="agent-name" [style.color]="agent.color||''">{{ agent.nickname }}</span><span class="agent-role">CHIEF</span></div>
               <div class="status-line" [class.live]="isActive(agent)">
@@ -52,6 +59,13 @@ import { CreateAgentModalComponent } from '../create-agent-modal/create-agent-mo
       @for (agent of workers; track agent.id) {
         <div class="agent-card" [class.selected]="selectedId === agent.id" (click)="select(agent)">
           <span class="status-dot" [class]="statusClass(agent.status)" [class.is-active]="isActive(agent)" [style.--agent-color]="agent.color || statusBg(agent)"></span>
+          <span class="agent-kind" [class.independent]="!hasContext(agent)" [title]="hasContext(agent) ? 'Agente con contexto de equipo' : 'Agente independiente (sin contexto)'">
+            @if (hasContext(agent)) {
+              <svg viewBox="0 0 16 16" aria-hidden="true" class="kind-icon hive"><polygon points="8,1.5 12.8,4.2 12.8,9.8 8,12.5 3.2,9.8 3.2,4.2" /><polygon points="3.2,1 5.6,2.4 5.6,5 3.2,6.4 0.8,5 0.8,2.4" transform="translate(1.2,0.2) scale(0.7)" /><polygon points="12.8,1 15.2,2.4 15.2,5 12.8,6.4 10.4,5 10.4,2.4" transform="translate(-0.4,0.2) scale(0.7)" /></svg>
+            } @else {
+              <svg viewBox="0 0 16 16" aria-hidden="true" class="kind-icon bot"><rect x="3" y="5" width="10" height="7" rx="2" /><circle cx="6" cy="8.5" r="1" /><circle cx="10" cy="8.5" r="1" /><path d="M8 3v2M5.5 12v1.5M10.5 12v1.5M1.8 8.5h1.2M13 8.5h1.2" /></svg>
+            }
+          </span>
           <div class="agent-info">
             <div class="name-row"><span class="agent-name" [style.color]="agent.color||''">{{ agent.nickname }}</span></div>
             <div class="status-line" [class.live]="isActive(agent)">
@@ -85,6 +99,13 @@ import { CreateAgentModalComponent } from '../create-agent-modal/create-agent-mo
     .name-row{display:flex;align-items:center;gap:6px}
     .agent-name{font-weight:600;font-size:14px;line-height:1.2}
     .agent-model{font-size:10px;color:var(--text-muted);font-family:var(--font-mono)}
+
+    .agent-kind{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px;color:var(--accent-amber,#f59e0b)}
+    .agent-kind.independent{color:var(--text-secondary)}
+    .kind-icon{width:14px;height:14px;display:block}
+    .kind-icon.hive polygon{fill:currentColor;fill-opacity:.18;stroke:currentColor;stroke-width:1.1;stroke-linejoin:round}
+    .kind-icon.bot rect,.kind-icon.bot circle,.kind-icon.bot path{fill:none;stroke:currentColor;stroke-width:1.2;stroke-linecap:round;stroke-linejoin:round}
+    .kind-icon.bot circle{fill:currentColor;stroke:none}
     .status-line{display:flex;align-items:center;gap:6px;min-height:16px}
     .status-label{font-size:11px;color:var(--text-secondary);line-height:1.2}
     .status-line.live .status-label{background:linear-gradient(90deg,var(--text-secondary) 0%,var(--agent-color,var(--accent-blue)) 45%,var(--text-secondary) 90%);background-size:220% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:shimmer-agent 1.8s ease-in-out infinite}
@@ -133,6 +154,7 @@ export class SidebarLeftComponent implements OnInit, OnDestroy {
   statusBg(agent: IAgent): string { return agent.color || 'var(--accent-blue)'; }
   isActive(agent: IAgent): boolean { return agent.status === 'WORKING'; }
   queueDepth(id: string): number { return this.queueCounts.get(id) || 0; }
+  hasContext(agent: IAgent): boolean { return (agent as any).inject_context !== false; }
   statusLabel(agent: IAgent): string {
     switch (agent.status) {
       case 'WORKING': return 'Working — procesando';

@@ -38,7 +38,11 @@ import { IAgent } from '../../core/models/agent.model';
             <span class="mono">{{ color }}</span>
           </div>
         </div>
-        <div class="field"><label>Instrucción adicional (opcional)</label><textarea [(ngModel)]="instruction" rows="2"></textarea></div>
+        <div class="field check-field">
+          <label class="check-label"><input type="checkbox" [(ngModel)]="injectContext" /> Inyectar contexto del sistema y del equipo</label>
+          <div class="hint">Si se desactiva, el agente será independiente (sin system prompt, roster ni indicaciones agregadas) para tareas ligeras/transversales.</div>
+        </div>
+        <div class="field" [class.dimmed]="!injectContext"><label>Instrucción adicional (opcional)</label><textarea [(ngModel)]="instruction" rows="2" [disabled]="!injectContext"></textarea></div>
         <div class="err" *ngIf="error">{{ error }}</div>
       </div>
       <ng-template pTemplate="footer">
@@ -54,6 +58,7 @@ import { IAgent } from '../../core/models/agent.model';
     input,textarea,select{padding:6px 8px;background:var(--bg-secondary);border:1px solid var(--border-color);color:var(--text-primary);border-radius:var(--radius-sm)}
     .color-row{display:flex;align-items:center;gap:8px}.color-btn{width:36px;height:28px;border-radius:6px;border:1px solid var(--border-color);cursor:pointer;padding:0}
     .color-hidden{position:absolute;opacity:0;width:0;height:0;pointer-events:none}.mono{font-size:11px;color:var(--text-muted);font-family:var(--font-mono)}
+    .check-field{gap:6px}.check-label{display:flex;align-items:center;gap:8px;color:var(--text-primary);font-weight:500;cursor:pointer}.check-label input{width:16px;height:16px}.hint{font-size:11px;color:var(--text-muted);line-height:1.35}.dimmed{opacity:.55}
     .err{color:var(--accent-red);font-size:12px}.warn{color:var(--accent-amber,#f59e0b);font-size:12px}
   `],
 })
@@ -71,8 +76,9 @@ export class CreateAgentModalComponent implements OnInit {
       if (m.includes('/')) { this.selectedProvider = m.split('/')[0]; this.selectedModelId = m.split('/').slice(1).join('/'); }
       this.color = a.color || this.randColor();
       this.instruction = (a as any).additional_instruction || '';
+      this.injectContext = (a as any).inject_context !== false;
     } else {
-      this.nickname = ''; this.role = 'WORKER'; this.selectedProvider = ''; this.selectedModelId = ''; this.color = this.randColor(); this.instruction = '';
+      this.nickname = ''; this.role = 'WORKER'; this.selectedProvider = ''; this.selectedModelId = ''; this.color = this.randColor(); this.instruction = ''; this.injectContext = true;
     }
   }
   get agent(): IAgent | null { return this._agent; }
@@ -83,7 +89,7 @@ export class CreateAgentModalComponent implements OnInit {
 
   nickname = ''; role: 'CHIEF' | 'WORKER' = 'WORKER';
   modelProviders: ModelProvider[] = []; selectedProvider = ''; selectedModelId = '';
-  color = this.randColor(); instruction = ''; error = ''; activeWs: IWorkspace | null = null;
+  color = this.randColor(); instruction = ''; injectContext = true; error = ''; activeWs: IWorkspace | null = null;
 
   constructor(private agentService: AgentService, private ws: WorkspaceService) {}
 
@@ -108,7 +114,7 @@ export class CreateAgentModalComponent implements OnInit {
         ...this._agent,
         name: this.nickname, nickname: this.nickname, role: this.role,
         task_state: { ...(this._agent.task_state || {}), model: `${this.selectedProvider}/${this.selectedModelId}` },
-        color: this.color, additional_instruction: this.instruction || null,
+        color: this.color, additional_instruction: this.injectContext ? (this.instruction || null) : null, inject_context: this.injectContext,
       };
       this.agentService.update(this._agent.id, patch).subscribe({
         next: (saved) => { this.updated.emit(saved || patch); this.onHide(); },
@@ -120,10 +126,10 @@ export class CreateAgentModalComponent implements OnInit {
       id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `agent-${Date.now()}`,
       name: this.nickname, nickname: this.nickname, role: this.role, status: 'IDLE',
       current_session_id: null, task_state: { model: `${this.selectedProvider}/${this.selectedModelId}` },
-      workspace_id: this.activeWs!.id, color: this.color, additional_instruction: this.instruction || null,
+      workspace_id: this.activeWs!.id, color: this.color, additional_instruction: this.injectContext ? (this.instruction || null) : null, inject_context: this.injectContext,
     };
     this.agentService.create(agent).subscribe({
-      next: (created) => { this.created.emit(created); this.onHide(); this.nickname=''; this.color=this.randColor(); this.instruction=''; },
+      next: (created) => { this.created.emit(created); this.onHide(); this.nickname=''; this.color=this.randColor(); this.instruction=''; this.injectContext = true; },
       error: (e) => { this.error = e?.error?.message || e?.message || 'Error creando agente'; },
     });
   }

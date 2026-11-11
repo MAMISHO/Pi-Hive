@@ -15,6 +15,7 @@ export class AgentMapper {
       workspace_id: json.workspace_id,
       additional_instruction: json.additional_instruction ?? null,
       color: json.color ?? null,
+      inject_context: json.inject_context !== false,
     };
   }
 
@@ -30,6 +31,7 @@ export class AgentMapper {
       workspace_id: agent.workspace_id,
       additional_instruction: agent.additional_instruction ?? null,
       color: agent.color ?? null,
+      inject_context: agent.inject_context !== false,
     };
   }
 }

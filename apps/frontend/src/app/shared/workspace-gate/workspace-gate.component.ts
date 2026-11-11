@@ -133,7 +133,7 @@ export class WorkspaceGateComponent implements OnInit {
     this.ws.create(this.wsName||'workspace', this.newPath.trim(), this.hitlEnabled).subscribe({
       next: (ws) => {
         const afterWs = () => {
-          const chief:any={ id:`chief-${Date.now().toString(36)}`, name:this.chiefNickname, nickname:this.chiefNickname, role:'CHIEF', status:'IDLE', workspace_id:ws.id, color:this.chiefColor, additional_instruction:this.chiefInstruction||null, task_state: this.chiefModel?{model:this.chiefModel}:null };
+          const chief:any={ id:`chief-${Date.now().toString(36)}`, name:this.chiefNickname, nickname:this.chiefNickname, role:'CHIEF', status:'IDLE', workspace_id:ws.id, color:this.chiefColor, additional_instruction:this.chiefInstruction||null, inject_context:true, task_state: this.chiefModel?{model:this.chiefModel}:null };
           this.agents.create(chief).subscribe({ next:()=>{ this.wizardOpen=false; this.visible=false; }, error:(e)=>{ this.error=e?.error?.message||'Failed to create chief (color may conflict)'; } });
         };
         const updates: any = {};

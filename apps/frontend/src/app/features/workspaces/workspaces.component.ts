@@ -151,7 +151,7 @@ export class WorkspacesComponent implements OnInit {
     this.saving=true; this.chiefModel=`${this.selectedProvider}/${this.selectedModelId}`;
     this.ws.create(this.wsName||'workspace', this.newPath.trim(), this.hitlEnabled).subscribe({
       next:(ws)=>{
-        const finish=()=>{ const chief:any={ id:`chief-${Date.now().toString(36)}`, name:this.chiefNickname||'Chief', nickname:this.chiefNickname||'Chief', role:'CHIEF', status:'IDLE', workspace_id:ws.id, color:this.chiefColor, additional_instruction:this.chiefInstruction||null, task_state:{model:this.chiefModel} };
+        const finish=()=>{ const chief:any={ id:`chief-${Date.now().toString(36)}`, name:this.chiefNickname||'Chief', nickname:this.chiefNickname||'Chief', role:'CHIEF', status:'IDLE', workspace_id:ws.id, color:this.chiefColor, additional_instruction:this.chiefInstruction||null, inject_context:true, task_state:{model:this.chiefModel} };
           this.agents.create(chief).subscribe({ next:()=>{ this.ws.refreshActive(); this.wizardOpen=false; this.saving=false; this.load(); setTimeout(()=>this.router.navigateByUrl('/swarm-monitor'), 50); }, error:(e)=>{this.error=e?.error?.message||'Error creando chief (¿color duplicado?)'; this.saving=false;} });
         };
         if(this.useCustomChiefPrompt && this.customChiefPrompt.trim()) this.ws.update(ws.id,{custom_chief_prompt:this.customChiefPrompt}).subscribe({next:finish,error:finish}); else finish();

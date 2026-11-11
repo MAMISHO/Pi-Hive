@@ -675,16 +675,21 @@ export class AgentRunnerService implements OnModuleInit {
       this.trace.systemPromptApplied(runId, agent.id, workspaceId, task.id, isResumed).catch(() => {});
       this.trace.turnInput(runId, agent.id, workspaceId, task.id, 'turn', promptText.length).catch(() => {});
 
+      const hasInjectedContext = !!String(systemPrompt || '').trim();
       if (isResumed) {
         this.systemPromptInjected.add(agent.id);
       } else if (!this.systemPromptInjected.has(agent.id)) {
-        const additional = (agent as any).additional_instruction?.trim();
-        const ctx = `[SYSTEM CONTEXT · injected by Pi-Hive]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${workspaceId}).\n\n${systemPrompt}` + (additional ? `\n\n[ADDITIONAL INSTRUCTION]\n${additional}` : '');
-        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'system_prompt', ctx, `system-${agent.id}-${Date.now()}`).catch(() => {});
+        if (hasInjectedContext) {
+          const additional = (agent as any).additional_instruction?.trim();
+          const ctx = `[SYSTEM CONTEXT · injected by Pi-Hive]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${workspaceId}).\n\n${systemPrompt}` + (additional ? `\n\n[ADDITIONAL INSTRUCTION]\n${additional}` : '');
+          await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'system_prompt', ctx, `system-${agent.id}-${Date.now()}`).catch(() => {});
+        }
         this.systemPromptInjected.add(agent.id);
       } else if (!isResumed && !isDelegationCallback) {
         // first task of new session but injection marker missing in-memory (e.g. after restart) - re-inject visibly once
-        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'system_prompt', `[SYSTEM CONTEXT · injected by Pi-Hive]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${workspaceId}).\n\n${systemPrompt}`, `system-${agent.id}-${Date.now()}`).catch(() => {});
+        if (hasInjectedContext) {
+          await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'system_prompt', `[SYSTEM CONTEXT · injected by Pi-Hive]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${workspaceId}).\n\n${systemPrompt}`, `system-${agent.id}-${Date.now()}`).catch(() => {});
+        }
         this.systemPromptInjected.add(agent.id);
       }
       let resourceLoader: any = undefined;
@@ -1107,9 +1112,11 @@ export class AgentRunnerService implements OnModuleInit {
       try {
         const team = (await this.agentRepository.getAll()).filter((a: any) => a.status !== 'PAUSED' && !a.archived_at);
         const sp = await this.promptBuilder.buildSystem({ agent, team } as any);
-        const additional = (agent as any).additional_instruction?.trim();
-        const ctx = `[SYSTEM CONTEXT · injected by Pi-Hive (post-clear)]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${agent.workspace_id}).\n\n${sp}` + (additional ? `\n\n[ADDITIONAL INSTRUCTION]\n${additional}` : '');
-        await AgentChatEventEntity.create({ workspace_id: agent.workspace_id, agent_id: agent.id, task_id: null, parent_task_id: null, direction: 'OUTBOUND', kind: 'system_prompt', content: ctx, collapsible_group_id: `system-${agent.id}-${Date.now()}`, created_at: new Date() } as any);
+        if (String(sp || '').trim()) {
+          const additional = (agent as any).additional_instruction?.trim();
+          const ctx = `[SYSTEM CONTEXT · injected by Pi-Hive (post-clear)]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${agent.workspace_id}).\n\n${sp}` + (additional ? `\n\n[ADDITIONAL INSTRUCTION]\n${additional}` : '');
+          await AgentChatEventEntity.create({ workspace_id: agent.workspace_id, agent_id: agent.id, task_id: null, parent_task_id: null, direction: 'OUTBOUND', kind: 'system_prompt', content: ctx, collapsible_group_id: `system-${agent.id}-${Date.now()}`, created_at: new Date() } as any);
+        }
       } catch {}
     }
 

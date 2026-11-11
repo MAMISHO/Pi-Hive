@@ -12,4 +12,5 @@ export interface IAgent {
   workspace_id: string | null;
   additional_instruction: string | null;
   color: string | null;
+  inject_context: boolean;
 }

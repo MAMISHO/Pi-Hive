@@ -59,6 +59,14 @@ export const databaseProviders = [
             }
           }
         } catch (e) { console.warn('[DB] tasks_queue migrate:', (e as any)?.message || e); }
+        try {
+          const [acols]: any = await sequelize.query("PRAGMA table_info(agents);");
+          const anames = new Set((acols || []).map((c: any) => c.name));
+          if (!anames.has('inject_context')) {
+            await sequelize.query("ALTER TABLE agents ADD COLUMN inject_context BOOLEAN NOT NULL DEFAULT 1;");
+            console.log('[DB] added agents.inject_context');
+          }
+        } catch (e) { console.warn('[DB] agents migrate:', (e as any)?.message || e); }
         console.log('Database synchronized (alter).');
 
         // Seed/refresh immutable default system prompt (global) from catalog files
