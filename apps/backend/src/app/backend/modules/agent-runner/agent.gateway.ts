@@ -21,6 +21,7 @@ export class AgentGateway implements OnGatewayInit {
     fwd('agent:run:finished');
     fwd('agent:run:error');
     fwd('agent:run:warning');
+    fwd('agent:run:usage');
     fwd('agent:transcript:cleared');
     fwd('tasks:cleared');
     try {

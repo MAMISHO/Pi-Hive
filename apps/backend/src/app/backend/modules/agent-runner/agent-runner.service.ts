@@ -750,6 +750,29 @@ export class AgentRunnerService implements OnModuleInit {
       let toolCallsTotal = 0;
       let retryNudged = false;
       let discardStreamingEvents = false;
+      const runUsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, costFromProvider: false };
+      let usageTurns = 0;
+      const accumulateUsage = (u: any) => {
+        if (!u) return;
+        usageTurns += 1;
+        runUsageTotals.input += Number(u.input || 0);
+        runUsageTotals.output += Number(u.output || 0);
+        runUsageTotals.cacheRead += Number(u.cacheRead || 0);
+        runUsageTotals.cacheWrite += Number(u.cacheWrite || 0);
+        runUsageTotals.totalTokens += Number(u.totalTokens || 0);
+        const c = u.cost || {};
+        runUsageTotals.cost.input += Number(c.input || 0);
+        runUsageTotals.cost.output += Number(c.output || 0);
+        runUsageTotals.cost.cacheRead += Number(c.cacheRead || 0);
+        runUsageTotals.cost.cacheWrite += Number(c.cacheWrite || 0);
+        runUsageTotals.cost.total += Number(c.total || 0);
+        if (c.totalFromProvider) runUsageTotals.costFromProvider = true;
+        agentEventEmitter.emit('agent:run:usage', {
+          agentId: agent.id, workspaceId, taskId: task.id, runId,
+          provider: resolved.provider, modelId: resolved.modelId, model: resolved.raw,
+          turn: usageTurns, usage: u, totals: JSON.parse(JSON.stringify(runUsageTotals)), emittedAt: Date.now(),
+        });
+      };
 
       const flushThinking = async () => {
         if (!thinkBuf) return;
@@ -785,6 +808,9 @@ export class AgentRunnerService implements OnModuleInit {
       };
 
       const unsubscribe = session.subscribe((event: any) => {
+        if (event.type === 'message_end' && event.message?.role === 'assistant' && event.message?.usage) {
+          accumulateUsage(event.message.usage);
+        }
         if (event.type === 'message_update' && event.assistantMessageEvent) {
           const ame = event.assistantMessageEvent;
           if (ame.type === 'text_delta' && ame.delta) { if (discardStreamingEvents) return; flushThinking().catch(() => {}); assistantText += ame.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: ame.delta, kind: 'text', emittedAt: Date.now() }); this.trace.textOutput(runId, agent.id, workspaceId, task.id, ame.delta.length).catch(() => {}); }

@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core';
 import { io, Socket } from 'socket.io-client';
 import { Observable, Subject } from 'rxjs';
-import { StreamTextEvent, StreamToolEvent, StatusChangeEvent, QueueUpdatedEvent, RunEvent, TaskChangedEvent } from '../models/stream.model';
+import { StreamTextEvent, StreamToolEvent, StatusChangeEvent, QueueUpdatedEvent, RunEvent, TaskChangedEvent, UsageEvent } from '../models/stream.model';
 
 const BASE_URL = 'http://localhost:8090';
 
@@ -18,6 +18,7 @@ export class WebsocketService {
   private taskChangedSubject = new Subject<TaskChangedEvent>();
   private queueUpdatedSubject = new Subject<QueueUpdatedEvent>();
   private runEventSubject = new Subject<RunEvent>();
+  private usageSubject = new Subject<UsageEvent>();
   private rehydrateSubject = new Subject<void>();
 
   transcriptCleared$ = this.transcriptClearedSubject.asObservable();
@@ -26,6 +27,7 @@ export class WebsocketService {
   taskChanged$ = this.taskChangedSubject.asObservable();
   queueUpdated$ = this.queueUpdatedSubject.asObservable();
   runEvent$ = this.runEventSubject.asObservable();
+  usage$ = this.usageSubject.asObservable();
   rehydrate$ = this.rehydrateSubject.asObservable();
   streamText$: Observable<StreamTextEvent> = this.streamTextSubject.asObservable();
   streamTool$: Observable<StreamToolEvent> = this.streamToolSubject.asObservable();
@@ -51,6 +53,7 @@ export class WebsocketService {
     this.socket.on('agent:run:finished', (data: RunEvent) => this.runEventSubject.next({ ...data, type: 'finished' }));
     this.socket.on('agent:run:error', (data: RunEvent) => this.runEventSubject.next({ ...data, type: 'error' }));
     this.socket.on('agent:run:warning', (data: RunEvent) => this.runEventSubject.next({ ...data, type: 'warning' }));
+    this.socket.on('agent:run:usage', (data: UsageEvent) => this.usageSubject.next(data));
     this.socket.on('agent:transcript:cleared', (data: any) => this.transcriptClearedSubject.next(data));
     this.socket.on('tasks:cleared', (data: any) => this.tasksClearedSubject.next(data));
     this.socket.on('task:updated', (data: any) => this.taskUpdatedSubject.next(data));

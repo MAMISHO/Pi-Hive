@@ -94,7 +94,10 @@ export class LiveConsoleComponent implements OnInit, OnDestroy {
 
   constructor(private ws: WebsocketService, private selection: AgentSelectionService, private cache: LiveStreamCacheService) {}
 
-  hasActivity(): boolean { return !!this.textBuffer || !!this.thinkingBuffer || this.tools.length > 0; }
+  hasActivity(): boolean {
+    const b = this.cache.get(this.selectedAgentId);
+    return !!b.active || !!this.textBuffer || !!this.thinkingBuffer || this.tools.length > 0;
+  }
   toggleCollapsed(v: boolean): void { this.collapsed = v; this.collapsedChange.emit(v); }
 
   private sync() {

@@ -17,3 +17,13 @@ export interface QueueItem { taskId: number; sender_agent_id?: string; sender_ni
 export interface QueueUpdatedEvent { agentId: string; workspaceId?: string | null; currentTaskId?: number | null; pendingCount: number; pendingTaskIds?: number[]; items?: QueueItem[]; emittedAt?: number; }
 export interface RunEvent { agentId: string; workspaceId?: string | null; taskId?: number | null; runId?: string | null; [k: string]: any; }
 export interface TaskChangedEvent { taskId: number; workspaceId?: string | null; agentId?: string | null; previousStatus?: string | null; status: string; task?: any; reason?: string; emittedAt?: number; }
+
+export interface UsageEvent {
+  agentId: string; workspaceId?: string | null; taskId?: number | null; runId?: string | null;
+  provider?: string; modelId?: string; model?: string;
+  turn?: number;
+  usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number; reasoning?: number; cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total?: number; totalFromProvider?: boolean } };
+  totals?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number; cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total?: number }; costFromProvider?: boolean };
+  emittedAt?: number;
+}
+

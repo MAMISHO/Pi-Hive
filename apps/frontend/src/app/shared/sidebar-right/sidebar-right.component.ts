@@ -9,6 +9,7 @@ import { WebsocketService } from '../../core/services/websocket.service';
 import { WorkspaceService } from '../../core/services/workspace.service';
 import { AgentService } from '../../core/services/agent.service';
 import { UiFeedbackService } from '../../core/services/ui-feedback.service';
+import { TokenUsageService, RunUsage, UsageTotals } from '../../core/services/token-usage.service';
 import { ITaskQueue } from '../../core/models/task.model';
 import { IAgent } from '../../core/models/agent.model';
 
@@ -31,59 +32,147 @@ interface Edge { x1:number; y1:number; x2:number; y2:number; color:string; kind:
   imports: [CommonModule, TagModule, ButtonModule],
   template: `
     <div class="sidebar-right">
-      <div class="header">
-        <h2>Task Lineage</h2>
-        <div class="head-actions"><span class="count">{{ tasks.length }}</span><button pButton icon="pi pi-trash" severity="danger" [text]="true" class="p-button-sm" title="Limpiar Task Lineage" (click)="clearLineage()"></button></div>
+      <div class="tabs">
+        <button type="button" class="tab" [class.active]="activeTab==='lineage'" (click)="setTab('lineage')">Task Lineage <span class="tcount">{{ tasks.length }}</span></button>
+        <button type="button" class="tab" [class.active]="activeTab==='usage'" (click)="setTab('usage')">Consumo <span class="tcount" *ngIf="usageRuns.length">{{ usageRuns.length }}</span></button>
       </div>
-      <div class="legend" *ngIf="agents.length">
-        <span class="leg" *ngFor="let a of agents"><i [style.background]="agentColor(a.id)"></i>{{a.nickname}}</span>
-        <span class="leg key"><i class="line solid"></i>resuelto</span>
-        <span class="leg key"><i class="line dashed"></i>en curso/pendiente</span>
-        <span class="leg key"><i class="line resolved-progress"></i>progreso reportado + resuelto</span>
-      </div>
-      <div class="timeline" #timeline>
-        <svg class="graph" *ngIf="edges.length" [attr.width]="graphW" [attr.height]="graphH">
-          <path *ngFor="let e of edges; trackBy: trackEdge"
-                [attr.d]="e.d"
-                [attr.stroke]="e.color"
-                fill="none"
-                stroke-width="2.4"
-                stroke-linecap="round"
-                [class.edge-path]="true"
-                [class.dashed]="e.dashed"
-                [class.solid]="!e.dashed"
-                [class.spine]="e.kind==='spine'"
-                [class.active-flow]="e.dashed"
-                [style.color]="e.color"/>
-          <circle class="node" *ngFor="let n of nodes; let i = index" [attr.cx]="cx(n)" [attr.cy]="cy[i]||0" r="5.5" [attr.fill]="n.color" [attr.stroke]="'var(--bg-secondary,#111827)'" stroke-width="1.5" [class.active-node]="(n.isProgress && !isResolvedProgress(n.id!)) || n.status==='PROCESSING' || n.status==='PENDING'" [style.color]="n.color">
-            <title>{{ nodeTitle(n) }}</title>
-          </circle>
-        </svg>
-        <div class="rows" [style.padding-left.px]="graphW">
-          @for (n of nodes; track n.id; let i = $index) {
-            <div #row class="task-timeline-item" [class.completed]="n.status==='COMPLETED'" [class.hold]="n.status==='HOLD'||n.status==='STOPPED'" [class.processing]="n.status==='PROCESSING'">
-              <div class="task-header">
-                <span class="flow" [class.out]="n.isReturn" [style.color]="n.color">{{ n.isReturn ? '↩' : '↳' }}</span>
-                <span class="task-id">#{{ n.id }}</span>
-                <span class="depth">d{{ n.depth }}</span>
-                <span class="ftag" *ngIf="n.isProgress">progress</span>
-                <span class="ftag final" *ngIf="n.isFinal">final</span>
-                <p-tag [value]="n.status" [severity]="severity(n.status)"></p-tag>
-              </div>
-              <div class="task-route"><span [style.color]="agentColor(n.sender_agent_id)">{{ label(n.sender_agent_id) }}</span> → <span [style.color]="agentColor(n.receiver_agent_id)">{{ label(n.receiver_agent_id) }}</span></div>
-              @if (n.parent_task_id) { <div class="parent">parent: #{{ n.parent_task_id }} · {{ n.task_flow || 'direct' }}<ng-container *ngIf="n.isProgress && !isResolvedProgress(n.id!)"> (en curso)</ng-container><ng-container *ngIf="n.isFinal"> (resuelto)</ng-container></div> }
-              <div class="payload" [title]="fullText(n)">{{ preview(n.payload) }}</div>
-            </div>
-          } @empty {
-            <div class="empty">No tasks yet</div>
-          }
+
+      @if (activeTab === 'lineage') {
+        <div class="header lineage-header">
+          <h2>Task Lineage</h2>
+          <div class="head-actions"><span class="count">{{ tasks.length }}</span><button pButton icon="pi pi-trash" severity="danger" [text]="true" class="p-button-sm" title="Limpiar Task Lineage" (click)="clearLineage()"></button></div>
         </div>
-      </div>
+        <div class="legend" *ngIf="agents.length">
+          <span class="leg" *ngFor="let a of agents"><i [style.background]="agentColor(a.id)"></i>{{a.nickname}}</span>
+          <span class="leg key"><i class="line solid"></i>resuelto</span>
+          <span class="leg key"><i class="line dashed"></i>en curso/pendiente</span>
+          <span class="leg key"><i class="line resolved-progress"></i>progreso reportado + resuelto</span>
+        </div>
+        <div class="timeline" #timeline>
+          <svg class="graph" *ngIf="edges.length" [attr.width]="graphW" [attr.height]="graphH">
+            <path *ngFor="let e of edges; trackBy: trackEdge"
+                  [attr.d]="e.d"
+                  [attr.stroke]="e.color"
+                  fill="none"
+                  stroke-width="2.4"
+                  stroke-linecap="round"
+                  [class.edge-path]="true"
+                  [class.dashed]="e.dashed"
+                  [class.solid]="!e.dashed"
+                  [class.spine]="e.kind==='spine'"
+                  [class.active-flow]="e.dashed"
+                  [style.color]="e.color"/>
+            <circle class="node" *ngFor="let n of nodes; let i = index" [attr.cx]="cx(n)" [attr.cy]="cy[i]||0" r="5.5" [attr.fill]="n.color" [attr.stroke]="'var(--bg-secondary,#111827)'" stroke-width="1.5" [class.active-node]="(n.isProgress && !isResolvedProgress(n.id!)) || n.status==='PROCESSING' || n.status==='PENDING'" [style.color]="n.color">
+              <title>{{ nodeTitle(n) }}</title>
+            </circle>
+          </svg>
+          <div class="rows" [style.padding-left.px]="graphW">
+            @for (n of nodes; track n.id; let i = $index) {
+              <div #row class="task-timeline-item" [class.completed]="n.status==='COMPLETED'" [class.hold]="n.status==='HOLD'||n.status==='STOPPED'" [class.processing]="n.status==='PROCESSING'">
+                <div class="task-header">
+                  <span class="flow" [class.out]="n.isReturn" [style.color]="n.color">{{ n.isReturn ? '↩' : '↳' }}</span>
+                  <span class="task-id">#{{ n.id }}</span>
+                  <span class="depth">d{{ n.depth }}</span>
+                  <span class="ftag" *ngIf="n.isProgress">progress</span>
+                  <span class="ftag final" *ngIf="n.isFinal">final</span>
+                  <p-tag [value]="n.status" [severity]="severity(n.status)"></p-tag>
+                </div>
+                <div class="task-route"><span [style.color]="agentColor(n.sender_agent_id)">{{ label(n.sender_agent_id) }}</span> → <span [style.color]="agentColor(n.receiver_agent_id)">{{ label(n.receiver_agent_id) }}</span></div>
+                @if (n.parent_task_id) { <div class="parent">parent: #{{ n.parent_task_id }} · {{ n.task_flow || 'direct' }}<ng-container *ngIf="n.isProgress && !isResolvedProgress(n.id!)"> (en curso)</ng-container><ng-container *ngIf="n.isFinal"> (resuelto)</ng-container></div> }
+                <div class="payload" [title]="fullText(n)">{{ preview(n.payload) }}</div>
+              </div>
+            } @empty {
+              <div class="empty">No tasks yet</div>
+            }
+          </div>
+        </div>
+      } @else {
+        <div class="usage-pane">
+          <div class="usage-summary">
+            <div class="u-card primary"><div class="u-label">Tokens totales</div><div class="u-value">{{ fmtNum(usageTotals.totalTokens) }}</div><div class="u-sub">workspace · sesión en vivo</div></div>
+            <div class="u-grid">
+              <div class="u-card"><div class="u-label">Entrada</div><div class="u-value sm">{{ fmtNum(usageTotals.input) }}</div></div>
+              <div class="u-card"><div class="u-label">Salida</div><div class="u-value sm">{{ fmtNum(usageTotals.output) }}</div></div>
+              <div class="u-card"><div class="u-label">Cache read</div><div class="u-value sm">{{ fmtNum(usageTotals.cacheRead) }}</div></div>
+              <div class="u-card"><div class="u-label">Cache write</div><div class="u-value sm">{{ fmtNum(usageTotals.cacheWrite) }}</div></div>
+            </div>
+            <div class="u-card cost"><div class="u-label">Coste</div><div class="u-value">{{ fmtCost(usageTotals.cost.total) }}</div><div class="u-sub">{{ usageTotals.costFromProvider ? 'reportado por proveedor' : 'estimado (catálogo)' }}</div></div>
+            <div class="u-breakdown" *ngIf="usageTotals.cost.total || usageTotals.input || usageTotals.output">
+              <div class="u-row"><span>Entrada</span><span>{{ fmtCost(usageTotals.cost.input) }}</span></div>
+              <div class="u-row"><span>Salida</span><span>{{ fmtCost(usageTotals.cost.output) }}</span></div>
+              <div class="u-row"><span>Cache read</span><span>{{ fmtCost(usageTotals.cost.cacheRead) }}</span></div>
+              <div class="u-row"><span>Cache write</span><span>{{ fmtCost(usageTotals.cost.cacheWrite) }}</span></div>
+            </div>
+          </div>
+          <div class="runs-header"><span>Ejecuciones (tiempo real)</span><span class="live-dot" [class.on]="usageRuns.length"></span></div>
+          <div class="runs-list">
+            @for (r of usageRuns; track r.runId) {
+              <div class="run-card">
+                <div class="run-top">
+                  <span class="agent-dot" [style.background]="agentColor(r.agentId)"></span>
+                  <span class="agent-name">{{ label(r.agentId) }}</span>
+                  <span class="run-task" *ngIf="r.taskId">#{{ r.taskId }}</span>
+                  <span class="run-turns">{{ r.turns }} turno{{ r.turns === 1 ? '' : 's' }}</span>
+                </div>
+                <div class="run-model" [title]="r.model || (r.provider+'/'+r.modelId)">{{ r.model || (r.provider + '/' + r.modelId) || 'modelo desconocido' }}</div>
+                <div class="run-metrics">
+                  <span title="Tokens totales"><b>{{ fmtNum(r.totals.totalTokens) }}</b> tok</span>
+                  <span title="Entrada / Salida">in {{ fmtNum(r.totals.input) }} · out {{ fmtNum(r.totals.output) }}</span>
+                </div>
+                <div class="run-metrics sub">
+                  <span>cache r {{ fmtNum(r.totals.cacheRead) }} · w {{ fmtNum(r.totals.cacheWrite) }}</span>
+                  <span class="run-cost">{{ fmtCost(r.totals.cost.total) }} <em>{{ r.totals.costFromProvider ? 'prov.' : 'est.' }}</em></span>
+                </div>
+                <div class="run-time">{{ fmtTime(r.updatedAt) }}</div>
+              </div>
+            } @empty {
+              <div class="empty">Sin datos de consumo aún. Se mostrará en tiempo real al ejecutar tareas.</div>
+            }
+          </div>
+        </div>
+      }
     </div>
   `,
   styles: [`
     :host { display: block; height: 100%; min-height: 0; }
     .sidebar-right { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; padding: 10px 10px 8px; box-sizing: border-box; }
+    .tabs { display:flex; gap:4px; padding:2px; background: var(--bg-tertiary, rgba(255,255,255,0.03)); border:1px solid var(--border-color); border-radius:10px; margin-bottom:8px; flex:0 0 auto; }
+    .tab { flex:1; display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:6px 8px; border:0; border-radius:8px; background:transparent; color: var(--text-muted); font-size:12px; font-weight:600; cursor:pointer; transition: all .15s ease; }
+    .tab:hover { color: var(--text-secondary); background: rgba(255,255,255,0.03); }
+    .tab.active { color: var(--text-primary); background: var(--bg-secondary, #161b22); box-shadow: 0 1px 2px rgba(0,0,0,0.2); }
+    .tcount { font: 10px var(--font-mono); color: var(--text-muted); background: rgba(255,255,255,0.06); padding: 0 6px; border-radius: 999px; }
+    .tab.active .tcount { color: var(--accent-blue); background: rgba(88,166,255,0.12); }
+    .usage-pane { flex:1 1 auto; min-height:0; overflow-y:auto; overflow-x:hidden; display:flex; flex-direction:column; gap:10px; padding-bottom:8px; overscroll-behavior: contain; }
+    .usage-summary { display:flex; flex-direction:column; gap:8px; }
+    .u-card { background: var(--bg-tertiary, rgba(255,255,255,0.02)); border:1px solid var(--border-color); border-radius:10px; padding:8px 10px; }
+    .u-card.primary { background: linear-gradient(135deg, rgba(88,166,255,0.10), rgba(59,130,246,0.04)); border-color: rgba(88,166,255,0.25); }
+    .u-card.cost { background: linear-gradient(135deg, rgba(34,197,94,0.08), rgba(34,197,94,0.02)); border-color: rgba(34,197,94,0.2); }
+    .u-label { font-size:10px; text-transform:uppercase; letter-spacing:.06em; color: var(--text-muted); margin-bottom:2px; }
+    .u-value { font-size:22px; font-weight:700; color: var(--text-primary); font-variant-numeric: tabular-nums; line-height:1.15; }
+    .u-value.sm { font-size:15px; }
+    .u-sub { font-size:10px; color: var(--text-muted); margin-top:2px; }
+    .u-grid { display:grid; grid-template-columns: 1fr 1fr; gap:6px; }
+    .u-breakdown { border:1px dashed var(--border-color); border-radius:8px; padding:6px 8px; display:flex; flex-direction:column; gap:4px; }
+    .u-row { display:flex; justify-content:space-between; font-size:11px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+    .u-row span:last-child { color: var(--text-primary); font-family: var(--font-mono); }
+    .runs-header { display:flex; align-items:center; justify-content:space-between; font-size:11px; font-weight:600; color: var(--text-secondary); text-transform:uppercase; letter-spacing:.05em; margin-top:2px; flex:0 0 auto; }
+    .live-dot { width:7px; height:7px; border-radius:50%; background: var(--text-muted); opacity:.5; }
+    .live-dot.on { background: #22c55e; opacity:1; box-shadow: 0 0 0 0 rgba(34,197,94,.5); animation: usage-pulse 1.6s ease-out infinite; }
+    @keyframes usage-pulse { 0%{box-shadow:0 0 0 0 rgba(34,197,94,.5)} 70%{box-shadow:0 0 0 6px rgba(34,197,94,0)} 100%{box-shadow:0 0 0 0 rgba(34,197,94,0)} }
+    .runs-list { display:flex; flex-direction:column; gap:8px; }
+    .run-card { border:1px solid var(--border-color); border-radius:10px; padding:8px 10px; background: rgba(255,255,255,0.015); }
+    .run-top { display:flex; align-items:center; gap:6px; font-size:12px; }
+    .agent-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+    .agent-name { font-weight:600; color: var(--text-primary); }
+    .run-task { font: 10px var(--font-mono); color: var(--text-muted); padding:0 5px; border:1px solid var(--border-color); border-radius:6px; }
+    .run-turns { margin-left:auto; font-size:10px; color: var(--text-muted); }
+    .run-model { font: 10px var(--font-mono); color: var(--text-secondary); margin-top:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .run-metrics { display:flex; justify-content:space-between; gap:8px; font-size:11px; color: var(--text-secondary); margin-top:6px; font-variant-numeric: tabular-nums; }
+    .run-metrics b { color: var(--text-primary); }
+    .run-metrics.sub { font-size:10px; color: var(--text-muted); margin-top:2px; }
+    .run-cost { color: var(--text-primary); }
+    .run-cost em { font-style:normal; color: var(--text-muted); font-size:9px; }
+    .run-time { font-size:10px; color: var(--text-muted); margin-top:4px; text-align:right; }
     .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex: 0 0 auto; }
     .head-actions{display:flex;align-items:center;gap:4px}
     .header h2 { font-size: 14px; font-weight: 600; color: var(--text-primary); margin: 0; }
@@ -124,18 +213,21 @@ interface Edge { x1:number; y1:number; x2:number; y2:number; color:string; kind:
   `],
 })
 export class SidebarRightComponent implements OnInit, AfterViewInit, OnDestroy {
+  activeTab: 'lineage' | 'usage' = 'lineage';
   tasks: ITaskQueue[] = [];
   agents: IAgent[] = [];
   nodes: GraphNode[] = [];
   edges: Edge[] = [];
   cy: number[] = [];
   graphW = 24; graphH = 0;
+  usageRuns: RunUsage[] = [];
+  usageTotals: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, costFromProvider: false };
   private agentMap = new Map<string, IAgent>();
   private subs: Subscription[] = [];
   private laneW = 16;
   @ViewChildren('row') rows!: QueryList<ElementRef<HTMLElement>>;
 
-  constructor(private taskService: TaskService, private ws: WebsocketService, private workspace: WorkspaceService, private agentService: AgentService, private cdr: ChangeDetectorRef, private feedback: UiFeedbackService) {}
+  constructor(private taskService: TaskService, private ws: WebsocketService, private workspace: WorkspaceService, private agentService: AgentService, private cdr: ChangeDetectorRef, private feedback: UiFeedbackService, private tokenUsage: TokenUsageService) {}
 
   ngOnInit(): void {
     this.load();
@@ -145,7 +237,18 @@ export class SidebarRightComponent implements OnInit, AfterViewInit, OnDestroy {
     this.subs.push(this.ws.tasksCleared$.subscribe(rel));
     this.subs.push(this.workspace.active$.subscribe(rel));
     this.subs.push((this.ws as any).transcriptCleared$?.subscribe(rel) || {unsubscribe(){}} as any);
+    this.subs.push(this.tokenUsage.runs$.subscribe(r => { this.usageRuns = r; this.cdr.detectChanges(); }));
+    this.subs.push(this.tokenUsage.workspaceTotals$.subscribe(t => { this.usageTotals = t; this.cdr.detectChanges(); }));
   }
+
+  setTab(tab: 'lineage' | 'usage') {
+    this.activeTab = tab;
+    if (tab === 'lineage') setTimeout(() => this.measure(), 0);
+  }
+
+  fmtNum(n: any): string { const v = Number(n || 0); return v.toLocaleString('en-US'); }
+  fmtCost(n: any): string { const v = Number(n || 0); if (v === 0) return '$0.00'; if (v > 0 && v < 0.01) return '$' + v.toFixed(4); return '$' + v.toFixed(2); }
+  fmtTime(ts: any): string { if (!ts) return ''; try { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); } catch { return ''; } }
 
   ngAfterViewInit(): void { this.subs.push(this.rows.changes.subscribe(() => setTimeout(() => this.measure(), 0))); }
 
