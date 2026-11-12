@@ -19,7 +19,7 @@ export class PromptBuilderService {
     const workspace = agent.workspace_id ? await this.workspaceRepo.get(agent.workspace_id) : null;
     const systemPrompt = await this.resolveSystemPrompt(workspace);
     const identity = `TU IDENTIDAD (inmutable, eres ESTE agente — nunca te confundas con otros):\n  - Tú eres: ${agent.nickname} (id=${agent.id})\n  - Rol: ${agent.role}\n  - Workspace: ${agent.workspace_id ?? 'none'}\nIMPORTANTE: La lista [EQUIPO] de abajo muestra a OTROS agentes (tu propio nombre normalmente NO aparece ahí, y eso es correcto). Actúa SIEMPRE como "${agent.nickname}". Si el remitente o el texto menciona a otra persona ("hola X", "dile a X"), TÚ sigues siendo "${agent.nickname}" (NO eres X): si debes obtener algo de X o que X haga algo, delega a X con delegate_task usando su nickname EXACTO.`;
-    const teamRoster = team.filter(a => a.id !== agent.id).map(a => `- alias/nickname: ${a.nickname} | rol: ${a.role} | id: ${a.id}`).join('\n') || '- (sin otros agentes registrados)';
+    const teamRoster = team.filter(a => a.id !== agent.id && !(a as any).archived_at).map(a => `- alias/nickname: ${a.nickname} | rol: ${a.role} | id: ${a.id}`).join('\n') || '- (sin otros agentes registrados)';
     const anti = `[PROTOCOLO OPERATIVO]\n- Sé siempre "${agent.nickname}"; no asumas el rol/identidad de otro.\n- Coordina con otros SOLO vía delegate_task(nickname EXACTO, solo alias; no inventes nombres fuera de [EQUIPO]).\n- No explores filesystem/código salvo petición explícita. Si recibes un resultado ya resuelto de tu delegación, intégralo y responde al solicitante sin reiniciar el flujo.`;
     const chief = agent.role === 'CHIEF'
       ? `\n${this.prompts.renderChief(workspace?.custom_chief_prompt?.trim() || this.prompts.chiefDefaultContent, teamRoster)}`
@@ -31,7 +31,7 @@ export class PromptBuilderService {
   async build(params: { agent: IAgent; taskPayload: string; team: IAgent[]; isResumed: boolean; isDelegationResult?: boolean; isDelegationProgress?: boolean; callbackContext?: string | null; sender?: { nickname: string; role?: string; id?: string } | null; depth?: number; depthPath?: string | null; planRef?: number | null; planBlock?: string | null; origin?: { nickname: string; role?: string; id?: string; rootTaskId?: number | null; rootUserPayload?: string | null } | null; taskId?: number | null; requestId?: number | null }): Promise<string> {
     const { agent, taskPayload, team, isDelegationResult, isDelegationProgress, callbackContext, sender, depth, depthPath, planRef, planBlock, origin, taskId, requestId } = params;
     if ((agent as any).inject_context === false) return String(taskPayload || '');
-    const teamShort = team.filter(a => a.id !== agent.id).map(a => `${a.nickname}[${a.role}]`).join(', ') || 'sin equipo';
+    const teamShort = team.filter(a => a.id !== agent.id && !(a as any).archived_at).map(a => `${a.nickname}[${a.role}]`).join(', ') || 'sin equipo';
     const flow = isDelegationProgress ? 'progress' : (isDelegationResult ? 'result' : 'direct');
     const hasPlan = planRef != null && !!planBlock;
     let delegationNote = '';

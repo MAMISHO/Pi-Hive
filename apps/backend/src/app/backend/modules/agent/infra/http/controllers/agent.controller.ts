@@ -2,7 +2,7 @@ import { Body, Controller, Delete, Get, Inject, Param, Post, Put, Query } from '
 import { IAgent } from '../../../domain/models/agent.interface.js';
 import { AgentStatus } from '../../../domain/models/agent-status.enum.js';
 import { IAgentRepository, IAgentRepositoryToken } from '../../../domain/repositories/agent-repository.interface.js';
-import { agentEventEmitter } from '../../../../agent-runner/agent-runner.service.js';
+import { agentEventEmitter, AgentRunnerService } from '../../../../agent-runner/agent-runner.service.js';
 import { AppSettingsService } from '../../../../app-settings/app-settings.service.js';
 import * as path from 'path';
 
@@ -133,14 +133,20 @@ export class AgentController {
   constructor(
     @Inject(IAgentRepositoryToken) private agentRepository: IAgentRepository,
     private readonly appSettings: AppSettingsService,
+    @Inject(AgentRunnerService) private readonly agentRunner: AgentRunnerService,
   ) {}
 
   @Get() async findAll(@Query('workspaceId') workspaceId?: string): Promise<IAgent[]> {
+    if (workspaceId) {
+      const result = await this.agentRepository.getByWorkspace(workspaceId);
+      const active = result.filter((a: any) => !a.archived_at).length;
+      console.log(`[agents][GET] workspaceId=${workspaceId} returned=${result.length} active=${active} archived=${result.length - active}`);
+      return result;
+    }
     const all = await this.agentRepository.getAll();
-    const active = all.filter((a: any) => !a.archived_at);
-    const result = workspaceId ? active.filter((a: any) => a.workspace_id === workspaceId) : active;
-    console.log(`[agents][GET] total=${all.length} active=${active.length} returned=${result.length}${workspaceId ? ` workspaceId=${workspaceId}` : ''}`);
-    return result;
+    const active = all.filter((a: any) => !a.archived_at).length;
+    console.log(`[agents][GET] (ALL) total=${all.length} active=${active} archived=${all.length - active}`);
+    return all;
   }
   @Get('admin/all') async findAllAdmin(): Promise<IAgent[]> { return await this.agentRepository.getAll(); }
   @Get('models') async listModels(): Promise<Array<{provider:string;models:string[]}>> {
@@ -202,15 +208,58 @@ export class AgentController {
   async remove(@Param('id') id: string) {
     const agent = await this.agentRepository.get(id);
     if (!agent) { console.warn(`[agents][DELETE] id=${id} not_found`); return { ok: false, reason: 'not_found' }; }
+    if ((agent as any).archived_at) {
+      console.warn(`[agents][DELETE] id=${id} already archived`);
+      return { ok: true, archived_at: (agent as any).archived_at, already: true };
+    }
+    // cannot disable while active/working; activity must be stopped first
+    if (agent.status === AgentStatus.WORKING) {
+      console.warn(`[agents][DELETE] id=${id} blocked: agent is WORKING`);
+      return { ok: false, reason: 'agent_working', message: 'Detén la actividad del agente antes de deshabilitarlo.' };
+    }
     const beforeArchived = (agent as any).archived_at ?? null;
     (agent as any).archived_at = new Date();
     agent.status = AgentStatus.IDLE;
     console.log(`[agents][DELETE] id=${id} name=${(agent as any).nickname || (agent as any).name} beforeArchived=${beforeArchived} -> archived_at=${(agent as any).archived_at}`);
-    agentEventEmitter.emit('agent:stop', id);
     await this.agentRepository.update(agent);
     const after = await this.agentRepository.get(id);
     console.log(`[agents][DELETE] id=${id} persisted archived_at=${(after as any)?.archived_at ?? null} status=${(after as any)?.status}`);
+    // emit after persist so stop handlers can't race and clobber archived_at
+    agentEventEmitter.emit('agent:stop', id);
+    // refresh other agents' system prompts/roster so disabled agent disappears from [EQUIPO]
+    this.agentRunner.refreshWorkspaceSystemPrompts((after as any)?.workspace_id || (agent as any).workspace_id).catch(() => {});
     return { ok: true, archived_at: (after as any)?.archived_at ?? (agent as any).archived_at };
+  }
+
+  @Delete(':id/permanent')
+  async removePermanent(@Param('id') id: string) {
+    const agent = await this.agentRepository.get(id);
+    if (!agent) { console.warn(`[agents][DELETE permanent] id=${id} not_found`); return { ok: false, reason: 'not_found' }; }
+    if (!(agent as any).archived_at) {
+      console.warn(`[agents][DELETE permanent] id=${id} blocked: not archived`);
+      return { ok: false, reason: 'not_archived', message: 'Solo se puede eliminar definitivamente un agente deshabilitado.' };
+    }
+    console.log(`[agents][DELETE permanent] id=${id} name=${(agent as any).nickname || (agent as any).name} archived_at=${(agent as any).archived_at}`);
+    await this.agentRepository.hardDelete(id);
+    const after = await this.agentRepository.get(id);
+    console.log(`[agents][DELETE permanent] id=${id} deleted=${!after}`);
+    this.agentRunner.refreshWorkspaceSystemPrompts((agent as any).workspace_id).catch(() => {});
+    return { ok: true, deleted: !after };
+  }
+
+  @Put(':id/restore')
+  async restore(@Param('id') id: string) {
+    const agent = await this.agentRepository.get(id);
+    if (!agent) { console.warn(`[agents][RESTORE] id=${id} not_found`); return { ok: false, reason: 'not_found' }; }
+    const beforeArchived = (agent as any).archived_at ?? null;
+    (agent as any).archived_at = null;
+    agent.status = AgentStatus.IDLE;
+    console.log(`[agents][RESTORE] id=${id} name=${(agent as any).nickname || (agent as any).name} beforeArchived=${beforeArchived} -> archived_at=null`);
+    await this.agentRepository.update(agent);
+    const after = await this.agentRepository.get(id);
+    console.log(`[agents][RESTORE] id=${id} persisted archived_at=${(after as any)?.archived_at ?? null} status=${(after as any)?.status}`);
+    this.agentRunner.refreshWorkspaceSystemPrompts((after as any)?.workspace_id || (agent as any).workspace_id).catch(() => {});
+    return { ok: true, agent: after };
   }
 
   @Get(':id') async findOne(@Param('id') id: string) { return await this.agentRepository.get(id); }

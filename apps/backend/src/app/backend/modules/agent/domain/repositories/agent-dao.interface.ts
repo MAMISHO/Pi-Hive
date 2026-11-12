@@ -8,4 +8,6 @@ export interface IAgentDAO {
   readAll(): Promise<IAgent[]>;
   update(agent: IAgent): Promise<void>;
   readByCriteria<K>(filter: Partial<K>): Promise<IAgent[]>;
+  getByWorkspace(workspaceId: string): Promise<IAgent[]>;
+  hardDelete(id: string): Promise<void>;
 }

@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { IWorkspace } from '../../../domain/models/workspace.interface.js';
 import { IWorkspaceRepository, IWorkspaceRepositoryToken } from '../../../domain/repositories/workspace-repository.interface.js';
+import { IAgentRepository, IAgentRepositoryToken } from '../../../../agent/domain/repositories/agent-repository.interface.js';
 import { DEFAULT_SYSTEM_PROMPT_ID } from '../../../../../core/infra/prompts/prompt.constants.js';
 import { agentEventEmitter } from '../../../../agent-runner/agent-runner.service.js';
 import { AgentEntity } from '../../../../agent/infra/persistence/sequalize/entities/agent.schema.js';
@@ -11,7 +12,7 @@ import { AgentSessionHistoryEntity } from '../../../../session-history/infra/per
 
 @Controller('workspaces')
 export class WorkspaceController {
-  constructor(@Inject(IWorkspaceRepositoryToken) private workspaceRepository: IWorkspaceRepository) {}
+  constructor(@Inject(IWorkspaceRepositoryToken) private workspaceRepository: IWorkspaceRepository, @Inject(IAgentRepositoryToken) private agentRepository: IAgentRepository) {}
 
   private async deactivateAll() {
     const all = await this.workspaceRepository.getAll();
@@ -36,6 +37,13 @@ export class WorkspaceController {
   async create(@Body() body: { name: string; path: string; hitl_enabled?: boolean }): Promise<IWorkspace> {
     await this.deactivateAll();
     return await this.workspaceRepository.add({ name: body.name, path: body.path, is_active: true, hitl_enabled: body.hitl_enabled ?? false, active_system_prompt_id: DEFAULT_SYSTEM_PROMPT_ID } as any);
+  }
+
+  @Get(':id/agents')
+  async getAgents(@Param('id') id: string) {
+    const list = await this.agentRepository.getByWorkspace(id);
+    console.log(`[workspaces][GET agents] workspaceId=${id} returned=${list.length}`);
+    return list;
   }
 
   @Get(':id') async getById(@Param('id') id: string): Promise<IWorkspace> { return await this.workspaceRepository.get(id) as IWorkspace; }

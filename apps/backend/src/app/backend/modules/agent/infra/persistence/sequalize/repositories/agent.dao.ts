@@ -46,4 +46,14 @@ export class AgentDAO extends GenericSequalizeDAO<AgentEntity> implements IAgent
     const entities = await super.readByCriteria(filter);
     return entities.map((e) => AgentMapper.toDomain(e as any));
   }
+
+  async getByWorkspace(workspaceId: string): Promise<IAgent[]> {
+    return this.readByCriteria({ workspace_id: workspaceId } as any);
+  }
+
+
+  async hardDelete(id: string): Promise<void> {
+    await (this as any).model.destroy({ where: { id } });
+    console.log(`[agent-dao][hardDelete] id=${id} deleted`);
+  }
 }

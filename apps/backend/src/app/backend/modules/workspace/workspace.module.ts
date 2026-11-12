@@ -4,8 +4,10 @@ import { WorkspaceDao } from './infra/persistence/sequalize/daos/workspace.dao.j
 import { WorkspaceRepository } from './infrastructure/workspace.repository.js';
 import { IWorkspaceRepositoryToken } from './domain/repositories/workspace-repository.interface.js';
 import { WorkspaceController } from './infra/http/controllers/workspace.controller.js';
+import { AgentModule } from '../agent/agent.module.js';
 
 @Module({
+  imports: [AgentModule],
   controllers: [WorkspaceController],
   providers: [
     { provide: 'WORKSPACE_MODEL', useValue: WorkspaceEntity },

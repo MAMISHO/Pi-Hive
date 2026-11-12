@@ -8,4 +8,6 @@ export interface IAgentRepository {
   add(agent: IAgent): Promise<IAgent>;
   update(agent: IAgent): Promise<void>;
   findByStatus(status: string): Promise<IAgent[]>;
+  getByWorkspace(workspaceId: string): Promise<IAgent[]>;
+  hardDelete(id: string): Promise<void>;
 }

@@ -255,11 +255,13 @@ export class SidebarRightComponent implements OnInit, AfterViewInit, OnDestroy {
   load(): void {
     const ws = this.workspace.active;
     const tasks$ = (ws ? this.taskService.getByWorkspace(ws.id) : this.taskService.getAll()).pipe(catchError(() => of([] as ITaskQueue[])));
-    const agents$ = this.agentService.getAll().pipe(catchError(() => of([] as IAgent[])));
+    const agents$ = (ws ? this.agentService.getByWorkspace(ws.id) : this.agentService.getAll()).pipe(catchError(() => of([] as IAgent[])));
     forkJoin({ list: tasks$, ags: agents$ }).subscribe(({ list, ags }) => {
-      this.tasks = (list as ITaskQueue[]) || [];
-      this.agents = ((ags as IAgent[]) || []).filter((a: any) => !ws || a.workspace_id === ws.id);
-      this.agentMap = new Map(this.agents.map(a => [a.id, a]));
+      const wsAgents = ((ags as IAgent[]) || []).filter((a: any) => !ws || a.workspace_id === ws.id);
+      this.agentMap = new Map(wsAgents.map(a => [a.id, a]));
+      this.agents = wsAgents.filter((a: any) => !(a as any).archived_at);
+      const archivedIds = new Set(wsAgents.filter((a: any) => !!(a as any).archived_at).map(a => a.id));
+      this.tasks = ((list as ITaskQueue[]) || []).filter(t => !archivedIds.has(t.sender_agent_id) && !archivedIds.has(t.receiver_agent_id));
       this.nodes = this.build(this.tasks);
       setTimeout(() => this.measure(), 0);
       this.cdr.detectChanges();
@@ -364,11 +366,11 @@ export class SidebarRightComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   agentColor(id: string): string {
-    const a = this.agentMap.get(id); if (a?.color) return a.color; if (id === 'user') return '#9ca3af';
+    const a = this.agentMap.get(id); if ((a as any)?.archived_at) return 'var(--text-muted,#6b7280)'; if (a?.color) return a.color; if (id === 'user') return '#9ca3af';
     let h = 0; for (let i = 0; i < (id || '').length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
     return `hsl(${h % 360} 65% 55%)`;
   }
-  label(id: string): string { if (id === 'user') return 'user'; return this.agentMap.get(id)?.nickname || this.short(id); }
+  label(id: string): string { if (id === 'user') return 'user'; const a = this.agentMap.get(id); if ((a as any)?.archived_at) return 'Deshabilitado'; return a?.nickname || this.short(id); }
   short(id: string): string { return id ? id.slice(0, 8) : ''; }
   preview(p: string): string { if (!p) return ''; const s = p.replace(/\s+/g, ' ').trim(); return s.length > 90 ? s.slice(0, 90) + '…' : s; }
 

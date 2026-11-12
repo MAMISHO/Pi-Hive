@@ -24,8 +24,9 @@ export class IdentityResolverService {
     const normalized = normalize(raw);
     const agents = await this.agentRepository.getAll();
 
-    // Try exact match first
+    // Try exact match first (exclude archived)
     let match = agents.find((a) => {
+      if ((a as any).archived_at) return false;
       if (a.nickname === raw) {
         if (workspaceId !== undefined && a.workspace_id !== workspaceId) return false;
         return true;
@@ -34,8 +35,9 @@ export class IdentityResolverService {
     });
 
     if (!match) {
-      // Try normalized match
+      // Try normalized match (exclude archived)
       match = agents.find((a) => {
+        if ((a as any).archived_at) return false;
         if (normalize(a.nickname) !== normalized) return false;
         if (workspaceId !== undefined && a.workspace_id !== workspaceId) return false;
         return true;
@@ -52,8 +54,9 @@ export class IdentityResolverService {
   }
 
   async getAvailableAgents(workspaceId?: string): Promise<IAgent[]> {
-    const agents = await this.agentRepository.getAll();
+    const agents = (await this.agentRepository.getAll()).filter((a:any)=>!a.archived_at);
     if (workspaceId === undefined) return agents;
-    return agents.filter((a) => a.workspace_id === workspaceId || a.workspace_id === null);
+    // Scope strictly to the workspace so roster/prompts don't leak other workspaces
+    return agents.filter((a) => a.workspace_id === workspaceId);
   }
 }

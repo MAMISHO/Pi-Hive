@@ -389,7 +389,7 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
       }
     }));
 
-    this.agentService.getAllAdmin().subscribe({ next: (list) => this.allAgents = list || [], error: () => this.agentService.getAll().subscribe({ next: (l) => this.allAgents = l || [], error: () => {} }) });
+    const wsId = this.workspaceService.active?.id; const req = wsId ? this.agentService.getByWorkspace(wsId) : this.agentService.getAllAdmin(); req.subscribe({ next: (list) => this.allAgents = list || [], error: () => this.agentService.getAllAdmin().subscribe({ next: (l) => this.allAgents = l || [], error: () => {} }) });
 
     this.subs.push(this.ws.runEvent$.subscribe((e: any) => {
       if (e?.agentId !== this.selectedAgentId) return;

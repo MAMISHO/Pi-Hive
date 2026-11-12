@@ -27,4 +27,12 @@ export class AgentRepositoryImpl implements IAgentRepository {
   async findByStatus(status: string): Promise<IAgent[]> {
     return this.agentDAO.readByCriteria({ status });
   }
+
+  async getByWorkspace(workspaceId: string): Promise<IAgent[]> {
+    return this.agentDAO.getByWorkspace(workspaceId);
+  }
+
+  async hardDelete(id: string): Promise<void> {
+    await this.agentDAO.hardDelete(id);
+  }
 }

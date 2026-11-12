@@ -1,11 +1,11 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 
-import { AgentPersistenceInfrastructureModule } from '../persistence/agent-persistence-infra.module.js';
+import { AgentApplicationModule } from '../../application/agent-application.module.js';
 import { AgentController } from './controllers/agent.controller.js';
+import { AgentRunnerModule } from '../../../agent-runner/agent-runner.module.js';
 
 @Module({
-  imports: [AgentPersistenceInfrastructureModule],
+  imports: [AgentApplicationModule, forwardRef(() => AgentRunnerModule)],
   controllers: [AgentController],
-  providers: [],
 })
 export class AgentHttpInfrastructureModule {}

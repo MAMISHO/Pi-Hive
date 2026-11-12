@@ -167,8 +167,8 @@ export class AgentRunnerService implements OnModuleInit {
     const agent = await this.agentRepository.get(agentId);
     if (agent) {
       agent.status = AgentStatus.IDLE;
-      await this.agentRepository.update(agent);
-      this.emitStatus(agent.id, agent.status, (agent as any).workspace_id, currentTaskId ?? null, null, reason);
+      await this.agentRepository.update(agent); // mapper preserves archived_at
+      this.emitStatus(agent.id, AgentStatus.IDLE, (agent as any).workspace_id, currentTaskId ?? null, null, reason);
       this.emitQueueState(agent.id, (agent as any).workspace_id);
       agentEventEmitter.emit('agent:run:finished', { agentId: agent.id, workspaceId: (agent as any).workspace_id, taskId: currentTaskId ?? null, runId: null, outcome: 'stopped', stopReason: reason, aborted: true, willRetry: false, emittedAt: Date.now() });
     }
@@ -255,7 +255,7 @@ export class AgentRunnerService implements OnModuleInit {
     if (!session) return;
     const agent = await this.agentRepository.get(agentId);
     if (!agent) return;
-    const availableAgents = (await this.agentRepository.getAll()).filter(a => a.status !== 'PAUSED' && !(a as any).archived_at);
+    const availableAgents = await this.identityResolverService.getAvailableAgents(agent.workspace_id || undefined);
     const sp = await this.promptBuilder.buildSystem({ agent, team: availableAgents });
     this.applySystemPrompt(session, sp);
   }
@@ -1177,7 +1177,7 @@ export class AgentRunnerService implements OnModuleInit {
       await AgentSessionHistoryEntity.create({ workspace_id: agent.workspace_id, agent_id: agent.id, session_id: agent.current_session_id, event_type: 'SESSION_CLEARED', summary: `Chat/sesión archivada (${(events as any[]).length} eventos) — ${agent.nickname}`, details: JSON.stringify(details), created_at: new Date() } as any).catch(() => {});
       await AgentChatEventEntity.destroy({ where: { workspace_id: agent.workspace_id, agent_id: agent.id } as any }).catch(() => {});
       try {
-        const team = (await this.agentRepository.getAll()).filter((a: any) => a.status !== 'PAUSED' && !a.archived_at);
+        const team = await this.identityResolverService.getAvailableAgents(agent.workspace_id);
         const sp = await this.promptBuilder.buildSystem({ agent, team } as any);
         if (String(sp || '').trim()) {
           const additional = (agent as any).additional_instruction?.trim();
@@ -1208,6 +1208,17 @@ export class AgentRunnerService implements OnModuleInit {
 
   private async saveChatEvent(workspaceId: string, agentId: string, task: ITaskQueue, direction: 'INBOUND' | 'OUTBOUND', kind: string, content: string, groupId: string) {
     try { await AgentChatEventEntity.create({ workspace_id: workspaceId, agent_id: agentId, task_id: task.id, parent_task_id: task.parent_task_id ?? null, direction, kind, content, collapsible_group_id: groupId, created_at: new Date() } as any); } catch {}
+  }
+
+  async refreshWorkspaceSystemPrompts(workspaceId: string): Promise<void> {
+    if (!workspaceId) return;
+    try {
+      const all = await this.agentRepository.getAll();
+      const wsAgents = all.filter((a: any) => a.workspace_id === workspaceId && !a.archived_at);
+      for (const a of wsAgents) {
+        try { await this.refreshSystemPrompt(a.id); } catch {}
+      }
+    } catch (e) { console.warn('[AgentRunner] refreshWorkspaceSystemPrompts failed', e); }
   }
 
   async stopWorkspaceAgents(workspaceId: string): Promise<{ ok: boolean; stopped: number }> {
