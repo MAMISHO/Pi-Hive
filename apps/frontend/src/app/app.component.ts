@@ -1,5 +1,5 @@
 import { Component, OnInit, OnDestroy } from '@angular/core';
-import { Router, RouterOutlet, RouterLink, RouterLinkActive, NavigationEnd } from '@angular/router';
+import { ActivatedRoute, Router, RouterOutlet, RouterLink, RouterLinkActive, NavigationEnd } from '@angular/router';
 import { CommonModule } from '@angular/common';
 import { ButtonModule } from 'primeng/button';
 import { Subscription, filter } from 'rxjs';
@@ -22,11 +22,11 @@ import { effortFull, effortShort } from './core/utils/thinking-level.util';
       <header class="app-header">
         <div class="brand"><span class="logo">π</span><h1>Pi-Hive</h1></div>
         <nav class="nav">
-          <a routerLink="/workspaces" routerLinkActive="active">Workspaces</a>
+          <a routerLink="/workspaces" routerLinkActive="active" [routerLinkActiveOptions]="{exact:true}">Workspaces</a>
           @if (!onWorkspacesPage) {
-            <a routerLink="/swarm-monitor" routerLinkActive="active">Swarm</a>
-            <a routerLink="/memory-timeline" routerLinkActive="active">Memory</a>
-            <a routerLink="/human-in-the-loop" routerLinkActive="active">HITL</a>
+            <a [routerLink]="workspacePath('swarm-monitor')" routerLinkActive="active">Swarm</a>
+            <a [routerLink]="workspacePath('memory-timeline')" routerLinkActive="active">Memory</a>
+            <a [routerLink]="workspacePath('human-in-the-loop')" routerLinkActive="active">HITL</a>
           }
         </nav>
         <div class="ws-actions" *ngIf="activeWs && !onWorkspacesPage">
@@ -92,20 +92,27 @@ export class AppComponent implements OnInit, OnDestroy {
   onWorkspacesPage = false;
   private subs: Subscription[] = [];
   get selectedAgent(): IAgent | null { return this.selection.selectedAgent; }
-  constructor(private selection: AgentSelectionService, private ws: WorkspaceService, private agentService: AgentService, private socket: WebsocketService, private router: Router, public ui: UiLayoutService, private feedback: UiFeedbackService) {
+  constructor(private selection: AgentSelectionService, private ws: WorkspaceService, private agentService: AgentService, private socket: WebsocketService, private router: Router, private route: ActivatedRoute, public ui: UiLayoutService, private feedback: UiFeedbackService) {
     this.ws.active$.subscribe(a=>{ this.activeWs=a; this.loadAgents(); });
-    this.onWorkspacesPage = this.router.url.startsWith('/workspaces');
+    const isWsList = (url: string) => url === '/workspaces' || url.startsWith('/workspaces?');
+    this.onWorkspacesPage = isWsList(this.router.url);
     this.subs.push(this.router.events.pipe(filter(e => e instanceof NavigationEnd)).subscribe((e: any) => {
-      this.onWorkspacesPage = (e.urlAfterRedirects || e.url || '').startsWith('/workspaces');
+      const url = e.urlAfterRedirects || e.url || '';
+      this.onWorkspacesPage = isWsList(url);
     }));
   }
+  workspacePath(child: string): any[] {
+    const id = this.activeWs?.id;
+    return id ? ['/workspaces', id, child] : ['/', child];
+  }
+
   ngOnInit(): void {
     this.subs.push(this.socket.statusChange$.subscribe((e:any)=>{ const a=this.agents.find(x=>x.id===e?.agentId); if(a) (a as any).status = e.status; this.computeBusy(); }));
     this.subs.push(this.socket.queueUpdated$.subscribe((e:any)=>{ this.computeBusy(); }));
   }
   loadAgents(): void {
     const id = this.activeWs?.id; if(!id){ this.agents=[]; this.computeBusy(); return; }
-    this.agentService.getAll().subscribe(list => { this.agents = (list||[]).filter((a:any)=>a.workspace_id===id); this.computeBusy(); });
+    this.agentService.getByWorkspace(id).subscribe(list => { this.agents = (list||[]); this.computeBusy(); });
   }
   shortPath(p: string): string {
     if (!p) return '';

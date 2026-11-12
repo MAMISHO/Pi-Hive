@@ -54,9 +54,15 @@ export class IdentityResolverService {
   }
 
   async getAvailableAgents(workspaceId?: string): Promise<IAgent[]> {
-    const agents = (await this.agentRepository.getAll()).filter((a:any)=>!a.archived_at);
-    if (workspaceId === undefined) return agents;
-    // Scope strictly to the workspace so roster/prompts don't leak other workspaces
-    return agents.filter((a) => a.workspace_id === workspaceId);
+    // Only active agents (archived_at must be null) scoped to the requested workspace
+    const agents = (await this.agentRepository.getAll()).filter((a: any) => a && a.archived_at == null);
+    if (!workspaceId) return [];
+    const seen = new Set<string>();
+    return agents.filter((a: any) => {
+      if (a.workspace_id !== workspaceId) return false;
+      if (!a.id || seen.has(a.id)) return false;
+      seen.add(a.id);
+      return true;
+    });
   }
 }

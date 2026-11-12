@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { WorkspaceEntity } from './infra/persistence/sequalize/entities/workspace.schema.js';
 import { WorkspaceDao } from './infra/persistence/sequalize/daos/workspace.dao.js';
 import { WorkspaceRepository } from './infrastructure/workspace.repository.js';
@@ -7,7 +7,7 @@ import { WorkspaceController } from './infra/http/controllers/workspace.controll
 import { AgentModule } from '../agent/agent.module.js';
 
 @Module({
-  imports: [AgentModule],
+  imports: [forwardRef(() => AgentModule)],
   controllers: [WorkspaceController],
   providers: [
     { provide: 'WORKSPACE_MODEL', useValue: WorkspaceEntity },

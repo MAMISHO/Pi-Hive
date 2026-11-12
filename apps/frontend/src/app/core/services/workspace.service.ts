@@ -18,6 +18,7 @@ export class WorkspaceService {
   constructor(private http: HttpClient) { this.refreshActive(); }
   get active(): IWorkspace | null { return this.activeSubject.getValue(); }
   getAll(): Observable<IWorkspace[]> { return this.http.get<IWorkspace[]>(`${BASE_URL}/workspaces`); }
+  getById(id: string): Observable<IWorkspace> { return this.http.get<IWorkspace>(`${BASE_URL}/workspaces/${id}`); }
   getActive(): Observable<IWorkspace | null> { return this.http.get<IWorkspace | null>(`${BASE_URL}/workspaces/active`); }
   refreshActive(): void { this.getActive().subscribe(ws => { const cur=this.activeSubject.getValue(); if((cur?.id||null)!==(ws?.id||null) || (!!cur)!==(!!ws)) this.activeSubject.next(ws); }); }
   create(name: string, path: string, hitl_enabled = false): Observable<IWorkspace> { return this.http.post<IWorkspace>(`${BASE_URL}/workspaces`, { name, path, hitl_enabled }).pipe(tap(ws => this.activeSubject.next(ws))); }

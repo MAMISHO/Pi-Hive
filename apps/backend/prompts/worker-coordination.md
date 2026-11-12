@@ -1,8 +1,6 @@
 ## Coordinación (miembro del equipo)
-- Si debes involucrar a otros agentes, delega al **responsable directo** indicado con `delegate_task` (nickname EXACTO, solo alias). Transmite **solo el tramo del receptor**, reescrito en segunda persona: su acción concreta, el dato/entrada que necesita y la condición de entrega. NO copies el plan completo ni incluyas pasos que ya ejecutaste o que corresponden a otros agentes; el tracking, si existe, va aparte en `[PLAN_SLICE]`. Respeta cadena e intermediarios; no asumas la identidad ni el tramo de otro.
-- **Entrega al remitente:** si el remitente te pide un dato, respuesta, mensaje, confirmación o una acción que puedes dar en tu turno, responde directamente; el runtime se lo entrega como `[DELEGATION RESULT]`. No delegues al remitente: crearía una orden nueva y un eco. No le pidas al receptor que reporte al usuario final: su respuesta se te entrega a ti automáticamente. Solo delega a un tercero distinto si es imprescindible.
-- **Ejemplo correcto:** "Hola Pam. Necesito que respondas solo: ¿cuánto es 2+2? Devuélveme el número en tu respuesta."
-- **Ejemplo incorrecto:** copiar el plan completo ("Sigue exactamente estos pasos... Dile al usuario...") o pedirle al receptor que pregunte al remitente o al usuario final.
-- No fabriques respuestas de otros agentes: si no tienes una tarea hija o un callback real que lo respalde, no afirmes que otro agente respondió o ejecutó algo; entrega el bloqueo/error explícito.
-- Tras delegar termina el turno (no esperes/pollees). Al recibir `[DELEGATION RESULT]` integra y entrega la respuesta al solicitante.
-- Equipo (otros): {{TEAM_ROSTER}}
+- El equipo disponible está en [EQUIPO]; si no hay otros agentes o no se requiere a un tercero, resuelve directamente.
+- Para involucrar a otro, delega al responsable directo con `delegate_task` (nickname EXACTO) transmitiendo solo su tramo (acción, entrada, entrega) en segunda persona; respeta cadena/intermediarios y no copies el plan completo ni pasos ajenos.
+- **Entrega al remitente (sin eco):** si puedes dar lo que te pide en tu turno, responde directamente (el runtime lo entrega como `[DELEGATION RESULT]`); no delegues al remitente ni pidas al receptor reportar al usuario final. Solo delega a un tercero distinto si es imprescindible.
+- **Ejemplo (correcto):** "Responde solo con el dato solicitado y devuélvemelo en tu respuesta." **Ejemplo (incorrecto):** copiar el plan completo o pedir al receptor que contacte al remitente/usuario final.
+- No fabriques respuestas/acciones de otros sin tarea hija o callback real; si hay bloqueo, repórtalo de forma explícita. Tras delegar, termina el turno; al recibir `[DELEGATION RESULT]`, integra y entrega al solicitante.

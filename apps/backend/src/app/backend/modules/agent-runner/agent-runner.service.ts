@@ -713,8 +713,8 @@ export class AgentRunnerService implements OnModuleInit {
         this.systemPromptInjected.add(agent.id);
       } else if (!this.systemPromptInjected.has(agent.id)) {
         if (hasInjectedContext) {
-          const additional = (agent as any).additional_instruction?.trim();
-          const ctx = `[SYSTEM CONTEXT · injected by Pi-Hive]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${workspaceId}).\n\n${systemPrompt}` + (additional ? `\n\n[ADDITIONAL INSTRUCTION]\n${additional}` : '');
+          // systemPrompt already includes agent additional_instruction (PromptBuilder.buildSystem); do not append it again.
+          const ctx = `[SYSTEM CONTEXT · injected by Pi-Hive]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${workspaceId}).\n\n${systemPrompt}`;
           await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'system_prompt', ctx, `system-${agent.id}-${Date.now()}`).catch(() => {});
         }
         this.systemPromptInjected.add(agent.id);
@@ -1180,8 +1180,8 @@ export class AgentRunnerService implements OnModuleInit {
         const team = await this.identityResolverService.getAvailableAgents(agent.workspace_id);
         const sp = await this.promptBuilder.buildSystem({ agent, team } as any);
         if (String(sp || '').trim()) {
-          const additional = (agent as any).additional_instruction?.trim();
-          const ctx = `[SYSTEM CONTEXT · injected by Pi-Hive (post-clear)]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${agent.workspace_id}).\n\n${sp}` + (additional ? `\n\n[ADDITIONAL INSTRUCTION]\n${additional}` : '');
+          // sp already includes agent additional_instruction (PromptBuilder.buildSystem); do not append it again.
+          const ctx = `[SYSTEM CONTEXT · injected by Pi-Hive (post-clear)]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${agent.workspace_id}).\n\n${sp}`;
           await AgentChatEventEntity.create({ workspace_id: agent.workspace_id, agent_id: agent.id, task_id: null, parent_task_id: null, direction: 'OUTBOUND', kind: 'system_prompt', content: ctx, collapsible_group_id: `system-${agent.id}-${Date.now()}`, created_at: new Date() } as any);
         }
       } catch {}

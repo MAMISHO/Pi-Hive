@@ -254,8 +254,9 @@ export class SidebarRightComponent implements OnInit, AfterViewInit, OnDestroy {
 
   load(): void {
     const ws = this.workspace.active;
-    const tasks$ = (ws ? this.taskService.getByWorkspace(ws.id) : this.taskService.getAll()).pipe(catchError(() => of([] as ITaskQueue[])));
-    const agents$ = (ws ? this.agentService.getByWorkspace(ws.id) : this.agentService.getAll()).pipe(catchError(() => of([] as IAgent[])));
+    if (!ws) { this.tasks = []; this.agents = []; this.agentMap.clear(); this.nodes = []; this.edges = []; this.cy = []; this.graphW = 24; this.graphH = 0; this.cdr.detectChanges(); return; }
+    const tasks$ = this.taskService.getByWorkspace(ws.id).pipe(catchError(() => of([] as ITaskQueue[])));
+    const agents$ = this.agentService.getByWorkspace(ws.id).pipe(catchError(() => of([] as IAgent[])));
     forkJoin({ list: tasks$, ags: agents$ }).subscribe(({ list, ags }) => {
       const wsAgents = ((ags as IAgent[]) || []).filter((a: any) => !ws || a.workspace_id === ws.id);
       this.agentMap = new Map(wsAgents.map(a => [a.id, a]));
@@ -270,20 +271,71 @@ export class SidebarRightComponent implements OnInit, AfterViewInit, OnDestroy {
 
   build(list: ITaskQueue[]): GraphNode[] {
     const byId = new Map(list.map(t => [t.id!, t]));
+    const chrono = [...list].sort((a, b) => new Date(a.created_at as any).getTime() - new Date(b.created_at as any).getTime() || (a.id ?? 0) - (b.id ?? 0));
+
+    const isProgressTask = (t: ITaskQueue): boolean => {
+      const flowName = (t.task_flow || 'direct') as string;
+      return flowName === 'delegation_progress' || (t.callback_final === false && !!t.parent_task_callback);
+    };
+    const isResultTask = (t: ITaskQueue): boolean => {
+      const flowName = (t.task_flow || 'direct') as string;
+      return flowName === 'delegation_result' || (typeof t.payload === 'string' && t.payload.includes('[DELEGATION RESULT'));
+    };
+    const isReturnTask = (t: ITaskQueue): boolean => isProgressTask(t) || isResultTask(t) || !!t.parent_task_callback;
+
+    const findFulfilled = (t: ITaskQueue): ITaskQueue | undefined => {
+      let cur: ITaskQueue | undefined = t.parent_task_id ? byId.get(t.parent_task_id) : undefined;
+      const seen = new Set<number>();
+      while (cur && cur.id != null && !seen.has(cur.id)) {
+        seen.add(cur.id);
+        // request: sender=requester, receiver=executor  -> return: sender=executor, receiver=requester
+        if (cur.sender_agent_id === t.receiver_agent_id && cur.receiver_agent_id === t.sender_agent_id) return cur;
+        cur = cur.parent_task_id ? byId.get(cur.parent_task_id) : undefined;
+      }
+      return undefined;
+    };
+
+    // Lane = horizontal column (cx = 10 + lane*laneW). Delegation moves +1 to receiver; return moves back to requester's lane.
+    // Examples: A(lane0)->B => B lane1; B->A => A lane0. A->B, B->C => C lane2; C->B => B lane1; B->A => A lane0; C->A => A lane0.
+    const laneById = new Map<number, number>();
+    const getLane = (t: ITaskQueue, seen = new Set<number>()): number => {
+      if (t.id != null && laneById.has(t.id)) return laneById.get(t.id)!;
+      if (t.id != null) { if (seen.has(t.id)) return 0; seen.add(t.id); }
+      let lane = 0;
+      if (!t.parent_task_id) {
+        lane = 0; // initial request: receiver (main agent) on lane 0
+      } else if (isReturnTask(t)) {
+        const fulfilled = findFulfilled(t);
+        if (fulfilled) {
+          // return to requester's column: requester acted at fulfilled.sender's context lane = lane of fulfilled's parent
+          const fParent = fulfilled.parent_task_id ? byId.get(fulfilled.parent_task_id) : undefined;
+          lane = fParent ? getLane(fParent, seen) : 0;
+        } else {
+          const p = byId.get(t.parent_task_id);
+          lane = p ? getLane(p, seen) : 0;
+        }
+      } else {
+        // delegation/direct: receiver column = sender's column + 1
+        const p = byId.get(t.parent_task_id);
+        lane = (p ? getLane(p, seen) : 0) + 1;
+      }
+      if (t.id != null) laneById.set(t.id, Math.max(0, lane));
+      return Math.max(0, lane);
+    };
+
     const depthOf = (t: ITaskQueue, seen = new Set<number>()): number => {
       if (typeof t.depth === 'number') return t.depth;
       if (!t.parent_task_id) return 0; if (seen.has(t.id!)) return 0; seen.add(t.id!);
       const p = byId.get(t.parent_task_id); return p ? 1 + depthOf(p, seen) : 0;
     };
-    const chrono = [...list].sort((a, b) => new Date(a.created_at as any).getTime() - new Date(b.created_at as any).getTime() || (a.id ?? 0) - (b.id ?? 0));
+
     return chrono.map(t => {
       const depth = depthOf(t);
-      const flowName = (t.task_flow || 'direct') as string;
-      const isProgress = flowName === 'delegation_progress' || (t.callback_final === false && !!t.parent_task_callback);
-      const isResult = flowName === 'delegation_result' || (typeof t.payload === 'string' && t.payload.includes('[DELEGATION RESULT'));
+      const isProgress = isProgressTask(t);
+      const isResult = isResultTask(t);
       const isFinal = isResult && (t.callback_final !== false);
-      const isReturn = isProgress || isResult || !!t.parent_task_callback;
-      const lane = isReturn ? Math.max(0, depth - 1) : depth;
+      const isReturn = isReturnTask(t);
+      const lane = getLane(t);
       const actorId = isReturn ? t.sender_agent_id : t.receiver_agent_id;
       const color = this.agentColor(actorId);
       return { ...t, depth, lane, isReturn, isProgress, isFinal, flow: isReturn ? 'out' : 'in', color, agentLabel: this.label(t.receiver_agent_id) } as GraphNode;
@@ -331,10 +383,29 @@ export class SidebarRightComponent implements OnInit, AfterViewInit, OnDestroy {
       }
     });
 
+    const resolveAttachParent = (n: GraphNode): GraphNode | null => {
+      const start = n.parent_task_id != null ? idx.get(n.parent_task_id) : undefined;
+      if (start == null) return null;
+      // For return/callback nodes, connect back to the request/branch they fulfill (requester -> sender),
+      // so final/progress bubbles up to the delegating branch (e.g. Chief) instead of stopping at sub-results.
+      if (n.isReturn || n.parent_task_callback) {
+        let curIdx: number | undefined = start;
+        const seen = new Set<number>();
+        while (curIdx != null && !seen.has(curIdx)) {
+          seen.add(curIdx);
+          const a = this.nodes[curIdx];
+          if (a.sender_agent_id === n.receiver_agent_id && a.receiver_agent_id === n.sender_agent_id) return a;
+          curIdx = a.parent_task_id != null ? idx.get(a.parent_task_id) : undefined;
+        }
+      }
+      return this.nodes[start] || null;
+    };
+
     this.nodes.forEach((n, i) => {
       if (!n.parent_task_id) return;
-      const pi = idx.get(n.parent_task_id); if (pi == null) return;
-      const parent = this.nodes[pi];
+      const parent = resolveAttachParent(n);
+      // if (!parent) return;
+      const pi = idx.get(parent.id as number); if (pi == null) return;
       const x1 = this.cx(parent), y1 = this.cy[pi] || 0;
       const x2 = this.cx(n), y2 = this.cy[i] || 0;
       const my = (y1 + y2) / 2;
@@ -354,12 +425,44 @@ export class SidebarRightComponent implements OnInit, AfterViewInit, OnDestroy {
       const kind: Edge['kind'] = n.isProgress ? (dashed ? 'return-progress' : 'return-resolved-progress') : (n.isFinal ? 'return-final' : (n.task_flow === 'direct' ? 'down' : 'down'));
       edges.push({ x1, y1, x2, y2, color: n.color, kind, d, dashed, key: `${parent.id}->${n.id}:${kind}:${dashed?'d':'s'}` });
     });
-    // outer spine (depth 0 lane) for continuity — always solid, color of origin agent
-    if (this.nodes.length) {
-      const x = 10; const ys = this.cy; if (ys.length > 1) {
-        const originColor = this.nodes[0].color || 'var(--border-color,#334155)';
-        const d = `M ${x} ${ys[0]} L ${x} ${ys[ys.length-1]}`;
-        edges.unshift({ x1:x,y1:ys[0],x2:x,y2:ys[ys.length-1], color: originColor, kind:'spine', d, dashed:false, key:`spine:${originColor}:${ys.length}` });
+    // outer spine (depth 0 lane): color = agent receiving the initial (root) request
+    // for the duration of its intervention (until its root chain returns complete), then follow next root.
+    if (this.nodes.length > 1) {
+      const x = 10; const ys = this.cy;
+      const idToIndex = new Map<number, number>();
+      this.nodes.forEach((n, i) => { if (n.id != null) idToIndex.set(n.id, i); });
+      const rootOf = (n: GraphNode): number => {
+        let cur = n;
+        const seen = new Set<number>();
+        while (cur.parent_task_id && idToIndex.has(cur.parent_task_id)) {
+          if (seen.has(cur.id as any)) break; seen.add(cur.id as any);
+          cur = this.nodes[idToIndex.get(cur.parent_task_id)!];
+        }
+        return idToIndex.get(cur.id as any) ?? 0;
+      };
+      // last index where a root intervention is still active (final return of its chain) or last node of its subtree
+      const rootEnd = new Map<number, number>();
+      this.nodes.forEach((n, i) => {
+        const r = rootOf(n);
+        const prev = rootEnd.get(r) ?? r;
+        // extend to this node; if it's a final result closing the chain, it marks completion boundary
+        rootEnd.set(r, Math.max(prev, i));
+      });
+      // determine active root agent per row: the latest root whose intervention spans this row
+      const spineColorAt = (i: number): string => {
+        let active: number | null = null;
+        for (const [r, end] of rootEnd.entries()) {
+          if (r <= i && i <= end) { if (active == null || r > active) active = r; }
+        }
+        if (active == null) return 'var(--border-color,#334155)';
+        const rootNode = this.nodes[active];
+        // agent that received the initial request
+        return this.agentColor(rootNode?.receiver_agent_id || '');
+      };
+      for (let i = ys.length - 2; i >= 0; i--) {
+        const color = spineColorAt(i);
+        const d = `M ${x} ${ys[i]} L ${x} ${ys[i + 1]}`;
+        edges.unshift({ x1: x, y1: ys[i], x2: x, y2: ys[i + 1], color, kind: 'spine', d, dashed: false, key: `spine:${i}:${color}` });
       }
     }
     return edges;

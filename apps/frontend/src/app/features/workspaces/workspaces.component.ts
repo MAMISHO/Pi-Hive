@@ -167,7 +167,7 @@ export class WorkspacesComponent implements OnInit {
   }
 
   load(){ this.ws.getAll().subscribe(l=>this.workspaces=l); }
-  openWorkspace(w:IWorkspace){ this.ws.activate(w.id).subscribe(()=>{ this.load(); this.router.navigateByUrl('/swarm-monitor'); }); }
+  openWorkspace(w:IWorkspace){ this.ws.activate(w.id).subscribe(()=>{ this.load(); this.router.navigateByUrl(`/workspaces/${w.id}/swarm-monitor`); }); }
   async deleteWorkspace(w:IWorkspace){ const ok = await this.feedback.confirm({ title: 'Eliminar workspace', message: `Eliminar workspace "${w.name}" (${w.path})?\nEsto eliminará sus agentes y tareas.`, confirmLabel: 'Eliminar', danger: true }); if(!ok) return; this.ws.delete(w.id).subscribe({ next: ()=>{ this.feedback.success(`Workspace "${w.name}" eliminado.`); this.load(); }, error: ()=> this.feedback.error('No se pudo eliminar el workspace.') }); }
   openCreate(){ this.editWs=null; this.resetWizard(); this.wizardOpen=true; this.chiefNickname='Chief-'+Math.random().toString(36).slice(2,5); this.chiefColor=this.randColor(); this.prompts=[{id:'default-system-prompt',workspace_id:null,name:'Default Hive System Prompt',content:'',is_default:true}]; }
   openEdit(w:IWorkspace){ this.editWs=w; this.wizardOpen=true; this.wsName=w.name; this.hitlEnabled=!!w.hitl_enabled; this.selectedPromptId=w.active_system_prompt_id||'default-system-prompt'; }
@@ -191,7 +191,7 @@ export class WorkspacesComponent implements OnInit {
     this.ws.create(this.wsName||'workspace', this.newPath.trim(), this.hitlEnabled).subscribe({
       next:(ws)=>{
         const finish=()=>{ const chief:any={ id:`chief-${Date.now().toString(36)}`, name:this.chiefNickname||'Chief', nickname:this.chiefNickname||'Chief', role:'CHIEF', status:'IDLE', workspace_id:ws.id, color:this.chiefColor, additional_instruction:this.chiefInstruction||null, inject_context:true, task_state:{model:this.chiefModel} };
-          this.agents.create(chief).subscribe({ next:()=>{ this.ws.refreshActive(); this.wizardOpen=false; this.saving=false; this.load(); setTimeout(()=>this.router.navigateByUrl('/swarm-monitor'), 50); }, error:(e)=>{this.error=e?.error?.message||'Error creando chief (¿color duplicado?)'; this.saving=false;} });
+          this.agents.create(chief).subscribe({ next:()=>{ this.ws.refreshActive(); this.wizardOpen=false; this.saving=false; this.load(); setTimeout(()=>this.router.navigateByUrl(`/workspaces/${ws.id}/swarm-monitor`), 50); }, error:(e)=>{this.error=e?.error?.message||'Error creando chief (¿color duplicado?)'; this.saving=false;} });
         };
         if(this.useCustomChiefPrompt && this.customChiefPrompt.trim()) this.ws.update(ws.id,{custom_chief_prompt:this.customChiefPrompt}).subscribe({next:finish,error:finish}); else finish();
       }, error:(e)=>{ this.error=e?.error?.message||'Error creando workspace'; this.saving=false; }

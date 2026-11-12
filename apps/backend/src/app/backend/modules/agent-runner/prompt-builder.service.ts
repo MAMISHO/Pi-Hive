@@ -17,21 +17,49 @@ export class PromptBuilderService {
     const { agent, team } = params;
     if ((agent as any).inject_context === false) return '';
     const workspace = agent.workspace_id ? await this.workspaceRepo.get(agent.workspace_id) : null;
-    const systemPrompt = await this.resolveSystemPrompt(workspace);
-    const identity = `TU IDENTIDAD (inmutable, eres ESTE agente — nunca te confundas con otros):\n  - Tú eres: ${agent.nickname} (id=${agent.id})\n  - Rol: ${agent.role}\n  - Workspace: ${agent.workspace_id ?? 'none'}\nIMPORTANTE: La lista [EQUIPO] de abajo muestra a OTROS agentes (tu propio nombre normalmente NO aparece ahí, y eso es correcto). Actúa SIEMPRE como "${agent.nickname}". Si el remitente o el texto menciona a otra persona ("hola X", "dile a X"), TÚ sigues siendo "${agent.nickname}" (NO eres X): si debes obtener algo de X o que X haga algo, delega a X con delegate_task usando su nickname EXACTO.`;
-    const teamRoster = team.filter(a => a.id !== agent.id && !(a as any).archived_at).map(a => `- alias/nickname: ${a.nickname} | rol: ${a.role} | id: ${a.id}`).join('\n') || '- (sin otros agentes registrados)';
-    const anti = `[PROTOCOLO OPERATIVO]\n- Sé siempre "${agent.nickname}"; no asumas el rol/identidad de otro.\n- Coordina con otros SOLO vía delegate_task(nickname EXACTO, solo alias; no inventes nombres fuera de [EQUIPO]).\n- No explores filesystem/código salvo petición explícita. Si recibes un resultado ya resuelto de tu delegación, intégralo y responde al solicitante sin reiniciar el flujo.`;
-    const chief = agent.role === 'CHIEF'
-      ? `\n${this.prompts.renderChief(workspace?.custom_chief_prompt?.trim() || this.prompts.chiefDefaultContent, teamRoster)}`
-      : `\n${this.prompts.renderWorkerCoordination(teamRoster)}`;
-    const additional = agent.additional_instruction?.trim() ? `\n[INSTRUCCIÓN AGENTE]\n${agent.additional_instruction.trim()}` : '';
-    return `[PI-HIVE SYSTEM]\n${identity}\n${anti}\n\n${systemPrompt || ''}${chief}${additional}\n\n[EQUIPO (OTROS agentes · nicknames exactos para delegar; tú eres "${agent.nickname}")]\n${teamRoster}`;
+    const systemPrompt = (await this.resolveSystemPrompt(workspace)) || '';
+    const teamRoster = (team || [])
+      .filter((a: any) => a && a.id && a.id !== agent.id)
+      .filter((a: any) => a.archived_at == null)
+      .filter((a: any) => !!agent.workspace_id && a.workspace_id === agent.workspace_id)
+      .filter((a: any, i: number, arr: any[]) => arr.findIndex((x: any) => x.id === a.id) === i)
+      .map((a: any) => `- alias/nickname: ${a.nickname} | rol: ${a.role} | id: ${a.id}`)
+      .join('\n') || '- (sin otros agentes activos en este workspace)';
+
+    const identity = [
+      `[PI-HIVE SYSTEM · identidad inmutable]`,
+      `- Eres: ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${agent.workspace_id ?? 'none'}).`,
+      `- Actúa siempre como "${agent.nickname}" (nunca asumas la identidad/rol de otro, aunque el texto mencione a otra persona).`,
+      `- Coordina con otros solo vía \`delegate_task\` usando un nickname EXACTO de [EQUIPO] (solo alias; no inventes agentes).`,
+    ].join('\n');
+
+    const roleBlock = agent.role === 'CHIEF'
+      ? this.prompts.renderChief(workspace?.custom_chief_prompt?.trim() || this.prompts.chiefDefaultContent, teamRoster)
+      : this.prompts.renderWorkerCoordination(teamRoster);
+
+    const additional = agent.additional_instruction?.trim()
+      ? `\n[INSTRUCCIÓN DEL AGENTE]\n${agent.additional_instruction.trim()}`
+      : '';
+
+    // Single canonical team section (avoid duplicating roster inside role templates/custom prompts)
+    const equipoBlock = `[EQUIPO · otros agentes activos del workspace; nicknames exactos para delegar; tú eres "${agent.nickname}"]\n${teamRoster}`;
+
+    return [
+      identity,
+      '',
+      systemPrompt.trim(),
+      '',
+      roleBlock.trim(),
+      additional,
+      '',
+      equipoBlock,
+    ].filter((v, i, arr) => !(v === '' && arr[i - 1] === '')).join('\n');
   }
 
   async build(params: { agent: IAgent; taskPayload: string; team: IAgent[]; isResumed: boolean; isDelegationResult?: boolean; isDelegationProgress?: boolean; callbackContext?: string | null; sender?: { nickname: string; role?: string; id?: string } | null; depth?: number; depthPath?: string | null; planRef?: number | null; planBlock?: string | null; origin?: { nickname: string; role?: string; id?: string; rootTaskId?: number | null; rootUserPayload?: string | null } | null; taskId?: number | null; requestId?: number | null }): Promise<string> {
     const { agent, taskPayload, team, isDelegationResult, isDelegationProgress, callbackContext, sender, depth, depthPath, planRef, planBlock, origin, taskId, requestId } = params;
     if ((agent as any).inject_context === false) return String(taskPayload || '');
-    const teamShort = team.filter(a => a.id !== agent.id && !(a as any).archived_at).map(a => `${a.nickname}[${a.role}]`).join(', ') || 'sin equipo';
+    const teamShort = (team || []).filter((a: any) => a && a.id !== agent.id && a.archived_at == null && !!agent.workspace_id && a.workspace_id === agent.workspace_id).filter((a: any,i: number,arr: any[])=>arr.findIndex((x: any)=>x.id===a.id)===i).map((a: any) => `${a.nickname}[${a.role}]`).join(', ') || 'sin otros agentes activos';
     const flow = isDelegationProgress ? 'progress' : (isDelegationResult ? 'result' : 'direct');
     const hasPlan = planRef != null && !!planBlock;
     let delegationNote = '';
