@@ -104,7 +104,13 @@ export class LiveConsoleComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.subs.push(this.selection.selectedAgent$.subscribe((a) => { this.selectedAgentId = a?.id ?? null; this.sync(); }));
-    this.subs.push(this.ws.runEvent$.subscribe((e: any) => { if (e?.type === 'started' && e.agentId) this.cache.resetRun(e.agentId, e.runId); if (e?.agentId === this.selectedAgentId) this.sync(); }));
+    this.subs.push(this.ws.runEvent$.subscribe((e: any) => {
+      if (e?.agentId) {
+        if (e.type === 'started') this.cache.resetRun(e.agentId, e.runId);
+        if (e.type === 'finished' || e.type === 'error') this.cache.clearRun(e.agentId, e.runId);
+      }
+      if (e?.agentId === this.selectedAgentId) this.sync();
+    }));
     this.subs.push(this.ws.streamText$.subscribe((e) => { this.cache.applyText(e); if (e.agentId === this.selectedAgentId) this.sync(); }));
     this.subs.push(this.ws.streamTool$.subscribe((e) => { this.cache.applyTool(e as any); if (e.agentId === this.selectedAgentId) this.sync(); }));
     this.subs.push(this.ws.transcriptCleared$.subscribe((e:any)=>{ if(e?.agentId===this.selectedAgentId){ this.cache.clear(this.selectedAgentId); this.sync(); } }));

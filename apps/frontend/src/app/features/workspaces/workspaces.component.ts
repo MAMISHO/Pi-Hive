@@ -6,6 +6,7 @@ import { ButtonModule } from 'primeng/button';
 import { Router } from '@angular/router';
 import { WorkspaceService, IWorkspace } from '../../core/services/workspace.service';
 import { UiFeedbackService } from '../../core/services/ui-feedback.service';
+import { AppSettingsService, AppSettingsResponse } from '../../core/services/app-settings.service';
 import { AgentService } from '../../core/services/agent.service';
 import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-prompts.service';
 
@@ -21,6 +22,27 @@ import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-
         <p class="sub">Cada workspace es un Hive independiente. Solo se puede abrir un workspace a la vez; para abrir otro usa otra pestaña del navegador.</p>
       </div>
       <button pButton label="Añadir workspace" icon="pi pi-plus" (click)="openCreate()"></button>
+    </div>
+
+    <div class="settings card">
+      <div class="settings-head">
+        <div>
+          <div class="name">Configuración de Pi</div>
+          <div class="path">Directorio de agente de Pi (auth, modelos, sesiones). Por defecto usa <code>PI_CODING_AGENT_DIR</code> o <code>~/.pi/agent</code> para compartir la sesión de la CLI (p. ej. Google Antigravity).</div>
+        </div>
+      </div>
+      <div class="settings-body">
+        <label>Pi agentDir
+          <div class="row">
+            <input class="flex" [(ngModel)]="piAgentDir" [placeholder]="appSettingsDefaults.piAgentDir || '~/.pi/agent'" />
+            <button pButton label="Usar por defecto" class="p-button-outlined p-button-sm" type="button" (click)="useDefaultPiAgentDir()"></button>
+            <button pButton label="Guardar" icon="pi pi-save" class="p-button-sm" type="button" (click)="saveSettings()" [disabled]="savingSettings"></button>
+          </div>
+        </label>
+        <div class="path">Efectivo: <span class="mono">{{ appSettingsEffective.piAgentDir || '—' }}</span></div>
+        <div class="ok" *ngIf="settingsMsg">{{ settingsMsg }}</div>
+        <div class="err" *ngIf="settingsErr">{{ settingsErr }}</div>
+      </div>
     </div>
 
     <div class="list">
@@ -116,6 +138,11 @@ import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-
     .dir{padding:4px 6px;border-radius:4px;cursor:pointer;font-size:12px}.dir:hover{background:var(--bg-tertiary)}
     .err{color:var(--accent-red);font-size:12px}.color-row{display:flex;align-items:center;gap:8px}
     .color-btn{width:36px;height:28px;border-radius:6px;border:1px solid var(--border-color);cursor:pointer;padding:0}
+    .settings{margin-bottom:18px;display:flex;flex-direction:column;gap:10px;align-items:stretch}
+    .settings-head{display:flex;justify-content:space-between;align-items:flex-start}
+    .settings-body{display:flex;flex-direction:column;gap:8px}
+    .ok{color:var(--accent-green,#22c55e);font-size:12px}
+    code{font-family:var(--font-mono);font-size:11px;color:var(--text-secondary)}
     .color-hidden{position:absolute;opacity:0;width:0;height:0;pointer-events:none}
   `]
 })
@@ -125,8 +152,20 @@ export class WorkspacesComponent implements OnInit {
   newPath=''; browseVisible=false; browseCurrent=''; browseParent:string|null=null; browseDirs:any[]=[];
   wsName=''; prompts: ISystemPrompt[]=[]; selectedPromptId='default-system-prompt';
   chiefNickname=''; modelProviders: Array<{provider:string;models:string[]}>=[]; selectedProvider=''; selectedModelId=''; chiefModel=''; chiefColor=this.randColor(); chiefInstruction=''; useCustomChiefPrompt=false; customChiefPrompt=''; hitlEnabled=false;
-  constructor(private ws: WorkspaceService, private agents: AgentService, private sp: SystemPromptsService, private router: Router, private feedback: UiFeedbackService) {}
-  ngOnInit(){ this.load(); this.agents.getModels().subscribe(m=>{this.modelProviders=(m as any)||[]; this.onProviderChange();}); }
+  constructor(private ws: WorkspaceService, private agents: AgentService, private sp: SystemPromptsService, private router: Router, private feedback: UiFeedbackService, private appSettings: AppSettingsService) {}
+  piAgentDir=''; appSettingsDefaults: {piAgentDir?: string} = {}; appSettingsEffective: {piAgentDir?: string} = {}; savingSettings=false; settingsMsg=''; settingsErr='';
+  ngOnInit(){ this.load(); this.loadSettings(); this.agents.getModels().subscribe(m=>{this.modelProviders=(m as any)||[]; this.onProviderChange();}); }
+  loadSettings(){ this.appSettings.get().subscribe({ next: (r: any) => { this.appSettingsDefaults = r.defaults || {}; this.appSettingsEffective = r.effective || {}; this.piAgentDir = (r.values && r.values['pi.agentDir']) || ''; }, error: () => {} }); }
+  useDefaultPiAgentDir(){ this.piAgentDir = ''; }
+  saveSettings(){
+    this.savingSettings = true; this.settingsMsg=''; this.settingsErr='';
+    const v = (this.piAgentDir || '').trim();
+    this.appSettings.update({ piAgentDir: v ? v : null }).subscribe({
+      next: (r: any) => { this.appSettingsDefaults = r.defaults || {}; this.appSettingsEffective = r.effective || {}; this.piAgentDir = (r.values && r.values['pi.agentDir']) || ''; this.savingSettings=false; this.settingsMsg='Configuración guardada.'; setTimeout(()=>this.settingsMsg='', 2500); this.feedback.success('Configuración de Pi guardada.'); },
+      error: (e) => { this.savingSettings=false; this.settingsErr = e?.error?.message || 'No se pudo guardar la configuración.'; this.feedback.error(this.settingsErr); }
+    });
+  }
+
   load(){ this.ws.getAll().subscribe(l=>this.workspaces=l); }
   openWorkspace(w:IWorkspace){ this.ws.activate(w.id).subscribe(()=>{ this.load(); this.router.navigateByUrl('/swarm-monitor'); }); }
   async deleteWorkspace(w:IWorkspace){ const ok = await this.feedback.confirm({ title: 'Eliminar workspace', message: `Eliminar workspace "${w.name}" (${w.path})?\nEsto eliminará sus agentes y tareas.`, confirmLabel: 'Eliminar', danger: true }); if(!ok) return; this.ws.delete(w.id).subscribe({ next: ()=>{ this.feedback.success(`Workspace "${w.name}" eliminado.`); this.load(); }, error: ()=> this.feedback.error('No se pudo eliminar el workspace.') }); }

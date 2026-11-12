@@ -18,6 +18,7 @@ import { PromptBuilderService } from './prompt-builder.service.js';
 import { RunTraceService } from './run-trace.service.js';
 import { DelegationPlannerService } from './delegation-planner.service.js';
 import { DelegationPlanStore } from './delegation-plan.store.js';
+import { AppSettingsService } from '../app-settings/app-settings.service.js';
 import { buildReceiverScopedInstruction } from './delegation-instruction.js';
 import { detectCopyPasteInstruction } from './delegation-instruction-guard.js';
 import { taskEventEmitter } from '../task-queue/infra/persistence/sequalize/entities/task-queue.schema.js';
@@ -35,6 +36,7 @@ export class AgentRunnerService implements OnModuleInit {
   private currentTaskByAgent = new Map<string, number>();
   private systemPromptInjected = new Set<string>();
   private cachedRuntime: any = null;
+  private cachedRuntimeAgentDir: string | null = null;
 
   constructor(
     @Inject(IAgentRepositoryToken) private agentRepository: IAgentRepository,
@@ -46,6 +48,7 @@ export class AgentRunnerService implements OnModuleInit {
     @Inject(RunTraceService) private trace: RunTraceService,
     @Inject(DelegationPlannerService) private delegationPlanner: DelegationPlannerService,
     @Inject(DelegationPlanStore) private planStore: DelegationPlanStore,
+    private readonly appSettings: AppSettingsService,
   ) {
     console.log('[AgentRunner] constructed');
   }
@@ -81,16 +84,38 @@ export class AgentRunnerService implements OnModuleInit {
     const modelId = idx >= 0 ? raw.slice(idx + 1) : raw;
     if (!provider || !modelId) return { ok: false, raw, provider, modelId, reason: `invalid model '${raw}' (expected provider/modelId)` };
     try {
-      if (!this.cachedRuntime) this.cachedRuntime = await (ModelRuntime as any).create({ refreshOnCreate: false, allowModelNetwork: false });
-      let model = this.cachedRuntime.getModel?.(provider, modelId) ?? this.cachedRuntime.getPhysicalModel?.(provider, modelId);
-      if (!model) { // retry once with a fresh runtime snapshot
-        this.cachedRuntime = await (ModelRuntime as any).create({ refreshOnCreate: false, allowModelNetwork: false });
-        model = this.cachedRuntime.getModel?.(provider, modelId) ?? this.cachedRuntime.getPhysicalModel?.(provider, modelId);
+      let agentDir = '';
+      try { agentDir = await this.appSettings.resolvePiAgentDir(); } catch { agentDir = path.join(process.cwd(), 'data', 'pi-agent'); }
+      agentDir = path.resolve(agentDir);
+
+      const loadRuntime = async () => {
+        const pi = await import('@earendil-works/pi-coding-agent') as any;
+        const cwd = process.cwd();
+        if (typeof pi.createAgentSessionServices === 'function') {
+          const settingsManager = pi.SettingsManager?.create ? pi.SettingsManager.create(cwd, agentDir) : undefined;
+          const services = await pi.createAgentSessionServices({ cwd, agentDir, settingsManager });
+          return services?.modelRuntime ?? null;
+        }
+        const opts: any = { refreshOnCreate: false, allowModelNetwork: false, agentDir };
+        return await (ModelRuntime as any).create(opts);
+      };
+
+      if (!this.cachedRuntime || this.cachedRuntimeAgentDir !== agentDir) {
+        this.cachedRuntime = await loadRuntime();
+        this.cachedRuntimeAgentDir = agentDir;
+      }
+
+      let model = this.cachedRuntime?.getModel?.(provider, modelId) ?? this.cachedRuntime?.getPhysicalModel?.(provider, modelId);
+      if (!model) { // retry once with a fresh runtime snapshot (loads packages/extensions/providers like ACP)
+        this.cachedRuntime = await loadRuntime();
+        this.cachedRuntimeAgentDir = agentDir;
+        model = this.cachedRuntime?.getModel?.(provider, modelId) ?? this.cachedRuntime?.getPhysicalModel?.(provider, modelId);
       }
       if (!model) return { ok: false, raw, provider, modelId, reason: `model not found in Pi runtime: ${provider}/${modelId}` };
       return { ok: true, provider, modelId, raw, model, runtime: this.cachedRuntime };
     } catch (e: any) {
       this.cachedRuntime = null;
+      this.cachedRuntimeAgentDir = null;
       return { ok: false, raw, provider, modelId, reason: `ModelRuntime error: ${e?.message || e}` };
     }
   }
@@ -693,7 +718,9 @@ export class AgentRunnerService implements OnModuleInit {
         this.systemPromptInjected.add(agent.id);
       }
       let resourceLoader: any = undefined;
-      try { resourceLoader = new (DefaultResourceLoader as any)({ cwd, agentDir: path.join(process.cwd(), 'data', 'pi-agent'), systemPrompt }); } catch (e) { console.warn('[AgentRunner] DefaultResourceLoader unavailable, using prompt injection', e); }
+      let agentDir = '';
+      try { agentDir = await this.appSettings.resolvePiAgentDir(); } catch { agentDir = path.join(process.cwd(), 'data', 'pi-agent'); }
+      try { resourceLoader = new (DefaultResourceLoader as any)({ cwd, agentDir, systemPrompt }); } catch (e) { console.warn('[AgentRunner] DefaultResourceLoader unavailable, using prompt injection', e); }
       console.log(`[AgentRunner] prompt built (sys=${systemPrompt.length}, task=${promptText.length}), creating AgentSession model=${resolved.raw}...`);
       const sessionOpts: any = { sessionManager, cwd, customTools: [delegateTaskTool, planDelegationTool], modelRuntime: resolved.runtime, model: resolved.model };
       if (resourceLoader) sessionOpts.resourceLoader = resourceLoader;

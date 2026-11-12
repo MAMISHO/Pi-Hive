@@ -4,8 +4,9 @@ import { createAgentSession, defineTool, SessionManager, DefaultResourceLoader }
 import * as fs from 'fs';
 import * as path from 'path';
 import type { DelegationNode, DelegationParada } from './delegation-plan.store.js';
+import { AppSettingsService } from '../app-settings/app-settings.service.js';
 
-const PLANNER_SKILL_PATH = path.join(process.cwd(), 'data', 'pi-agent', 'skills', 'delegation-planning', 'SKILL.md');
+const FALLBACK_PLANNER_SKILL_PATH = path.join(process.cwd(), 'data', 'pi-agent', 'skills', 'delegation-planning', 'SKILL.md');
 
 export interface DelegationPlanInput {
   model: any;
@@ -227,10 +228,15 @@ function parsePlan(text: string, roster: Array<{ nickname: string }>): (Delegati
 
 @Injectable()
 export class DelegationPlannerService {
-  private buildSystemPrompt(rosterText: string, requesterLabel?: string): string {
+  constructor(private readonly appSettings: AppSettingsService) {}
+
+  private buildSystemPrompt(rosterText: string, requesterLabel?: string, agentDir?: string): string {
     let skillBody = '';
     try {
-      skillBody = stripFrontmatter(fs.readFileSync(PLANNER_SKILL_PATH, 'utf-8')).trim();
+      const base = agentDir || (this.appSettings?.defaultPiAgentDir?.() ?? path.join(process.cwd(), 'data', 'pi-agent'));
+      const skillPath = path.join(base, 'skills', 'delegation-planning', 'SKILL.md');
+      const p = fs.existsSync(skillPath) ? skillPath : FALLBACK_PLANNER_SKILL_PATH;
+      skillBody = stripFrontmatter(fs.readFileSync(p, 'utf-8')).trim();
     } catch {
       skillBody = 'Produce a concise delegation tracking plan as a JSON tree (schema v2), all nodes PENDING, no result values in stop/parada.';
     }
@@ -261,7 +267,9 @@ export class DelegationPlannerService {
     const started = Date.now();
     const requesterLabel = String(input.requesterLabel || 'user/solicitante').trim() || 'user/solicitante';
     const rosterText = (roster || []).map((a) => `- ${a.nickname}${a.role ? ` (${a.role})` : ''}${a.id ? ` id=${a.id}` : ''}`).join('\n');
-    const systemPrompt = this.buildSystemPrompt(rosterText, requesterLabel);
+    let agentDir = path.join(process.cwd(), 'data', 'pi-agent');
+    try { agentDir = await this.appSettings.resolvePiAgentDir(); } catch {}
+    const systemPrompt = this.buildSystemPrompt(rosterText, requesterLabel, agentDir);
 
     const sessionManager = SessionManager.inMemory(cwd);
     let session: any;
@@ -271,8 +279,6 @@ export class DelegationPlannerService {
     let lastActivity = started;
     let firstActivityAt: number | null = null;
     let timedOut: 'idle' | 'max' | false = false;
-    const agentDir = path.join(process.cwd(), 'data', 'pi-agent');
-
     const markActivity = () => {
       const now = Date.now();
       if (firstActivityAt == null) firstActivityAt = now;

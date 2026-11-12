@@ -11,6 +11,7 @@ import { SystemPromptsModule } from './modules/system-prompts/system-prompts.mod
 import { SessionHistoryModule } from './modules/session-history/session-history.module.js';
 import { ChatTranscriptModule } from './modules/chat-transcript/chat-transcript.module.js';
 import { PongModule } from './modules/pong/pong.module.js';
+import { AppSettingsModule } from './modules/app-settings/app-settings.module.js';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { PongModule } from './modules/pong/pong.module.js';
     AgentMemoryModule,
     AgentRunnerModule,
     PongModule,
+    AppSettingsModule,
   ],
 })
 export class BackendModule {}

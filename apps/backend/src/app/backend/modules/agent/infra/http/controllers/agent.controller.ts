@@ -3,7 +3,8 @@ import { IAgent } from '../../../domain/models/agent.interface.js';
 import { AgentStatus } from '../../../domain/models/agent-status.enum.js';
 import { IAgentRepository, IAgentRepositoryToken } from '../../../domain/repositories/agent-repository.interface.js';
 import { agentEventEmitter } from '../../../../agent-runner/agent-runner.service.js';
-import { ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { AppSettingsService } from '../../../../app-settings/app-settings.service.js';
+import * as path from 'path';
 
 function normalizeModels(raw: any): Array<{ provider: string; models: string[] }> {
   const map = new Map<string, Set<string>>();
@@ -12,30 +13,52 @@ function normalizeModels(raw: any): Array<{ provider: string; models: string[] }
     if (!id) return;
     let prov = provider;
     let mid = String(id);
-    if (!prov && mid.includes('/')) { const i=mid.indexOf('/'); prov=mid.slice(0,i); mid=mid.slice(i+1); }
+    if (!prov && mid.includes('/')) { const i = mid.indexOf('/'); prov = mid.slice(0, i); mid = mid.slice(i + 1); }
     prov = prov || 'unknown';
     if (!map.has(prov)) map.set(prov, new Set());
     map.get(prov)!.add(mid);
   };
-  const walk = (x:any) => {
+  const walk = (x: any) => {
     if (Array.isArray(x)) { for (const item of x) walk(item); return; }
     if (x && typeof x === 'object') {
-      if (Array.isArray(x.models)) { const prov=x.provider||x.id||x.name; for (const m of x.models) add(prov,m); return; }
+      if (Array.isArray(x.models)) { const prov = x.provider || x.id || x.name; for (const m of x.models) add(prov, m); return; }
       if (Array.isArray(x.providers)) { walk(x.providers); return; }
       if (x.id && (x.provider || !x.models)) { add(x.provider, x); return; }
       for (const k of Object.keys(x)) { if (Array.isArray((x as any)[k])) walk((x as any)[k]); }
     } else if (typeof x === 'string') add(undefined, x);
   };
   walk(raw);
-  return Array.from(map.entries()).map(([provider, models]) => ({ provider, models: Array.from(models).sort() })).sort((a,b)=>a.provider.localeCompare(b.provider));
+  return Array.from(map.entries()).map(([provider, models]) => ({ provider, models: Array.from(models).sort() })).sort((a, b) => a.provider.localeCompare(b.provider));
 }
-async function getPiModels(): Promise<Array<{provider:string;models:string[]}>> {
+async function getPiModels(agentDir?: string): Promise<Array<{ provider: string; models: string[] }>> {
   try {
-    const { ModelRuntime } = await import('@earendil-works/pi-coding-agent');
-    const rt = await (ModelRuntime as any).create({ refreshOnCreate: false, allowModelNetwork: false });
-    const avail = rt.getAvailableSnapshot?.() || [];
-    const all = avail.length ? avail : (rt.getAllModels?.() || rt.getModels?.() || []);
-    return normalizeModels(all);
+    const pi = await import('@earendil-works/pi-coding-agent') as any;
+    const cwd = process.cwd();
+    const dir = agentDir ? path.resolve(agentDir) : path.resolve(cwd);
+
+    // Prefer full service/runtime creation so packages/extensions (e.g. antigravity-acp) register providers/models
+    if (typeof pi.createAgentSessionServices === 'function') {
+      const SettingsManager = pi.SettingsManager;
+      const settingsManager = SettingsManager?.create ? SettingsManager.create(cwd, dir) : undefined;
+      const services = await pi.createAgentSessionServices({
+        cwd,
+        agentDir: dir,
+        settingsManager,
+      });
+      const rt = services?.modelRuntime;
+      const avail = rt?.getAvailableSnapshot?.() || [];
+      const all = avail.length ? avail : (rt?.getAllModels?.() || rt?.getModels?.() || []);
+      return normalizeModels(all);
+    }
+
+    const ModelRuntime = pi.ModelRuntime;
+    if (ModelRuntime) {
+      const opts: any = { refreshOnCreate: false, allowModelNetwork: false, agentDir: dir };
+      const rt = await ModelRuntime.create(opts);
+      const avail = rt.getAvailableSnapshot?.() || [];
+      const all = avail.length ? avail : (rt.getAllModels?.() || rt.getModels?.() || []);
+      return normalizeModels(all);
+    }
   } catch (e) { console.warn('[agents/models] Pi SDK model discovery failed', e); }
   return [];
 }
@@ -49,11 +72,18 @@ function randomColor(existing: Set<string>): string {
 
 @Controller('agents')
 export class AgentController {
-  constructor(@Inject(IAgentRepositoryToken) private agentRepository: IAgentRepository) {}
+  constructor(
+    @Inject(IAgentRepositoryToken) private agentRepository: IAgentRepository,
+    private readonly appSettings: AppSettingsService,
+  ) {}
 
   @Get() async findAll(): Promise<IAgent[]> { return (await this.agentRepository.getAll()).filter((a: any) => !a.archived_at); }
   @Get('admin/all') async findAllAdmin(): Promise<IAgent[]> { return await this.agentRepository.getAll(); }
-  @Get('models') async listModels(): Promise<Array<{provider:string;models:string[]}>> { return await getPiModels(); }
+  @Get('models') async listModels(): Promise<Array<{provider:string;models:string[]}>> {
+    let agentDir = '';
+    try { agentDir = await this.appSettings.resolvePiAgentDir(); } catch {}
+    return await getPiModels(agentDir);
+  }
 
   @Post()
   async create(@Body() agentData: IAgent): Promise<IAgent> {

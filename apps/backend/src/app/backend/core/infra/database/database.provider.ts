@@ -9,6 +9,7 @@ import { AgentSessionHistoryEntity } from '../../../modules/session-history/infr
 import { AgentChatEventEntity } from '../../../modules/chat-transcript/infra/persistence/sequalize/entities/agent-chat-event.schema.js';
 import { AgentRunLogEntity } from '../../../modules/agent-runner/infra/persistence/sequalize/entities/agent-run-log.schema.js';
 import { DelegationPlanEntity } from '../../../modules/agent-runner/infra/persistence/sequalize/entities/delegation-plan.schema.js';
+import { AppSettingEntity } from '../../../modules/app-settings/infra/persistence/sequalize/entities/app-setting.schema.js';
 import { DEFAULT_SYSTEM_PROMPT_ID, DEFAULT_SYSTEM_PROMPT_NAME } from '../prompts/prompt.constants.js';
 import { FilePromptProvider } from '../prompts/provider/file-prompt.provider.js';
 
@@ -37,6 +38,7 @@ export const databaseProviders = [
           AgentChatEventEntity,
           AgentRunLogEntity,
           DelegationPlanEntity,
+          AppSettingEntity,
         ]);
         await sequelize.sync();
         // sqlite sync() doesn't add new columns to existing tables; add missing columns

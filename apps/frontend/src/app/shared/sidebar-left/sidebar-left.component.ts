@@ -91,7 +91,9 @@ import { CreateAgentModalComponent } from '../create-agent-modal/create-agent-mo
     </div>
   `,
   styles: [`
-    .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.header h2{font-size:14px;font-weight:600;color:var(--text-primary)}
+    .sidebar-left{height:100%;min-height:0;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column}
+    .header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-between;align-items:center;padding-bottom:12px;margin-bottom:0;background:var(--bg-secondary, #161b22)}
+    .header h2{font-size:14px;font-weight:600;color:var(--text-primary)}
     .section-label{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin:14px 0 6px}
     .agent-card{display:flex;align-items:flex-start;gap:10px;padding:10px;border-radius:10px;cursor:pointer;border:1px solid transparent;position:relative}
     .agent-card:hover{background:rgba(255,255,255,0.03);border-color:var(--border-color)} .agent-card.selected{background:rgba(59,130,246,0.08);border-color:rgba(59,130,246,0.25)}

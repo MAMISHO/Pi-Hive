@@ -28,6 +28,14 @@ export class LiveStreamCacheService {
     if (agentId) this.buffers.delete(agentId);
   }
 
+  clearRun(agentId: string, runId?: string | null) {
+    if (!agentId) return;
+    const b = this.buffers.get(agentId);
+    if (!b) return;
+    if (runId && b.runId && runId !== b.runId) return; // stale finished/error
+    this.buffers.delete(agentId);
+  }
+
   applyText(ev: StreamTextEvent) {
     if (!ev?.agentId) return;
     const b = this.get(ev.agentId);

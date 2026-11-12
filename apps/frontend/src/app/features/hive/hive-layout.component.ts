@@ -24,6 +24,7 @@ import { UiLayoutService } from '../../core/services/ui-layout.service';
     .hive-shell.right-collapsed{grid-template-columns:var(--sidebar-width) minmax(0,1fr)}
     .center-panel{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;padding:12px 16px 8px;background:var(--bg-primary)}
     .center-content{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column}
+    .sidebar-left{height:100%;min-height:0;overflow:hidden}
     .sidebar-right{overflow:hidden}
     @media(max-width:1024px){.hive-shell,.hive-shell.right-collapsed{grid-template-columns:1fr}.sidebar-left,.sidebar-right{display:none}.center-panel{padding:12px}}
   `]
