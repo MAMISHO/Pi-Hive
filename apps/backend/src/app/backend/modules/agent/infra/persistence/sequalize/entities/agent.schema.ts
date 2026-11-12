@@ -43,6 +43,9 @@ export class AgentEntity extends Model<IAgent> {
   @Column({ type: DataType.BOOLEAN, allowNull: false, defaultValue: true })
   inject_context: boolean;
 
+  @Column({ type: DataType.STRING, allowNull: true, defaultValue: 'low' })
+  thinking_level: string | null;
+
   @Column({ type: DataType.DATE, allowNull: true })
   archived_at: Date | null;
 }

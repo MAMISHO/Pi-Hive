@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Inject, Param, Post, Put } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Inject, Param, Post, Put, Query } from '@nestjs/common';
 import { IAgent } from '../../../domain/models/agent.interface.js';
 import { AgentStatus } from '../../../domain/models/agent-status.enum.js';
 import { IAgentRepository, IAgentRepositoryToken } from '../../../domain/repositories/agent-repository.interface.js';
@@ -63,6 +63,64 @@ async function getPiModels(agentDir?: string): Promise<Array<{ provider: string;
   return [];
 }
 
+
+type ThinkingLevel = 'off'|'minimal'|'low'|'medium'|'high'|'xhigh'|'max';
+const ALL_LEVELS: ThinkingLevel[] = ['minimal','low','medium','high','xhigh','max'];
+
+function computeAvailableThinkingLevels(model: any): ThinkingLevel[] {
+  if (!model) return [];
+  const reasoning = model.reasoning === true;
+  const map = model.thinkingLevelMap;
+  if (!reasoning && !map) return [];
+  if (map && typeof map === 'object') {
+    const out: ThinkingLevel[] = [];
+    for (const lvl of ALL_LEVELS) {
+      const v = (map as any)[lvl];
+      if (v !== null && v !== undefined) out.push(lvl);
+      // if key absent, treat as supported when reasoning is true? be conservative: include if reasoning true and not explicitly null
+      else if (v === undefined && reasoning) out.push(lvl);
+    }
+    return Array.from(new Set(out));
+  }
+  // reasoning true but no explicit map -> assume common levels supported
+  if (reasoning) return [...ALL_LEVELS];
+  return [];
+}
+function pickDefaultEffort(available: ThinkingLevel[]): ThinkingLevel {
+  if (available.includes('minimal')) return 'minimal';
+  if (available.includes('low')) return 'low';
+  return 'off';
+}
+function normalizeEffort(requested: any, available: ThinkingLevel[]): ThinkingLevel {
+  if (!available || available.length === 0) return 'off';
+  const r = String(requested || '') as ThinkingLevel;
+  if ((ALL_LEVELS as string[]).includes(r) && available.includes(r)) return r;
+  return pickDefaultEffort(available);
+}
+
+async function getPiModelCapabilities(agentDir: string | undefined, provider: string, modelId: string): Promise<{ available: ThinkingLevel[]; default: ThinkingLevel; reasoning: boolean }> {
+  try {
+    const pi = await import('@earendil-works/pi-coding-agent') as any;
+    const cwd = process.cwd();
+    const dir = agentDir ? path.resolve(agentDir) : path.resolve(cwd);
+    let rt: any = null;
+    if (typeof pi.createAgentSessionServices === 'function') {
+      const SettingsManager = pi.SettingsManager;
+      const settingsManager = SettingsManager?.create ? SettingsManager.create(cwd, dir) : undefined;
+      const services = await pi.createAgentSessionServices({ cwd, agentDir: dir, settingsManager });
+      rt = services?.modelRuntime;
+    } else if (pi.ModelRuntime) {
+      rt = await pi.ModelRuntime.create({ refreshOnCreate: false, allowModelNetwork: false, agentDir: dir });
+    }
+    const model = rt?.getModel?.(provider, modelId) ?? rt?.getPhysicalModel?.(provider, modelId);
+    const available = computeAvailableThinkingLevels(model);
+    return { available, default: pickDefaultEffort(available), reasoning: !!model?.reasoning };
+  } catch (e) {
+    console.warn('[agents/models/thinking-levels] failed', e);
+    return { available: [], default: 'off', reasoning: false };
+  }
+}
+
 function randomColor(existing: Set<string>): string {
   const palette = ['#22c55e','#3b82f6','#a855f7','#f59e0b','#06b6d4','#ec4899','#84cc16','#f97316','#14b8a6','#eab308','#8b5cf6','#ef4444','#10b981','#6366f1','#f43f5e'];
   for (const c of palette) if (!existing.has(c)) return c;
@@ -77,12 +135,46 @@ export class AgentController {
     private readonly appSettings: AppSettingsService,
   ) {}
 
-  @Get() async findAll(): Promise<IAgent[]> { return (await this.agentRepository.getAll()).filter((a: any) => !a.archived_at); }
+  @Get() async findAll(@Query('workspaceId') workspaceId?: string): Promise<IAgent[]> {
+    const all = await this.agentRepository.getAll();
+    const active = all.filter((a: any) => !a.archived_at);
+    const result = workspaceId ? active.filter((a: any) => a.workspace_id === workspaceId) : active;
+    console.log(`[agents][GET] total=${all.length} active=${active.length} returned=${result.length}${workspaceId ? ` workspaceId=${workspaceId}` : ''}`);
+    return result;
+  }
   @Get('admin/all') async findAllAdmin(): Promise<IAgent[]> { return await this.agentRepository.getAll(); }
   @Get('models') async listModels(): Promise<Array<{provider:string;models:string[]}>> {
     let agentDir = '';
     try { agentDir = await this.appSettings.resolvePiAgentDir(); } catch {}
     return await getPiModels(agentDir);
+  }
+
+  @Get('models/thinking-levels')
+  async getModelThinkingLevels(@Query('provider') provider: string, @Query('modelId') modelId: string): Promise<{ available: ThinkingLevel[]; default: ThinkingLevel; reasoning: boolean }> {
+    if (!provider || !modelId) return { available: [], default: 'off', reasoning: false };
+    let agentDir = '';
+    try { agentDir = await this.appSettings.resolvePiAgentDir(); } catch {}
+    return await getPiModelCapabilities(agentDir, provider, modelId);
+  }
+
+  @Put(':id/thinking-level')
+  async setThinkingLevel(@Param('id') id: string, @Body() body: { thinkingLevel?: string }) {
+    const agent = await this.agentRepository.get(id);
+    if (!agent) return { ok: false, reason: 'not_found' };
+    const rawModel = String((agent as any)?.task_state?.model || '').trim();
+    const idx = rawModel.indexOf('/');
+    const provider = idx >= 0 ? rawModel.slice(0, idx) : '';
+    const modelId = idx >= 0 ? rawModel.slice(idx + 1) : rawModel;
+    let agentDir = '';
+    try { agentDir = await this.appSettings.resolvePiAgentDir(); } catch {}
+    const caps = provider && modelId ? await getPiModelCapabilities(agentDir, provider, modelId) : { available: [] as ThinkingLevel[], default: 'off' as ThinkingLevel, reasoning: false };
+    const level = normalizeEffort(body?.thinkingLevel, caps.available);
+    (agent as any).thinkingLevel = level;
+    // also mirror in task_state for convenience
+    (agent as any).task_state = { ...((agent as any).task_state || {}), thinkingLevel: level };
+    await this.agentRepository.update(agent as any);
+    agentEventEmitter.emit('agent:thinking-level:changed', { agentId: id, thinkingLevel: level });
+    return { ok: true, thinkingLevel: level, available: caps.available, default: caps.default };
   }
 
   @Post()
@@ -94,9 +186,10 @@ export class AgentController {
     if (agentData.role === 'CHIEF' && inWs.some((a: any) => a.role === 'CHIEF')) throw new Error('Workspace already has a chief agent');
     const used = new Set(inWs.map((a:any)=>a.color).filter(Boolean));
     if (!agentData.color || used.has(agentData.color)) agentData.color = randomColor(used);
-    else agentData.color = randomColor(new Set(inWs.map((a:any)=>a.color).filter(Boolean)));
     if (!agentData.nickname) agentData.nickname = agentData.name || agentData.id;
     agentData.status = agentData.status || AgentStatus.IDLE;
+    if (!(agentData as any).thinkingLevel) (agentData as any).thinkingLevel = 'low';
+    (agentData as any).task_state = { ...((agentData as any).task_state || {}), thinkingLevel: (agentData as any).thinkingLevel };
     return await this.agentRepository.add(agentData);
   }
 
@@ -107,9 +200,17 @@ export class AgentController {
 
   @Delete(':id')
   async remove(@Param('id') id: string) {
-    const agent = await this.agentRepository.get(id); if (!agent) return { ok: false };
-    (agent as any).archived_at = new Date(); agent.status = AgentStatus.IDLE;
-    agentEventEmitter.emit('agent:stop', id); await this.agentRepository.update(agent); return { ok: true };
+    const agent = await this.agentRepository.get(id);
+    if (!agent) { console.warn(`[agents][DELETE] id=${id} not_found`); return { ok: false, reason: 'not_found' }; }
+    const beforeArchived = (agent as any).archived_at ?? null;
+    (agent as any).archived_at = new Date();
+    agent.status = AgentStatus.IDLE;
+    console.log(`[agents][DELETE] id=${id} name=${(agent as any).nickname || (agent as any).name} beforeArchived=${beforeArchived} -> archived_at=${(agent as any).archived_at}`);
+    agentEventEmitter.emit('agent:stop', id);
+    await this.agentRepository.update(agent);
+    const after = await this.agentRepository.get(id);
+    console.log(`[agents][DELETE] id=${id} persisted archived_at=${(after as any)?.archived_at ?? null} status=${(after as any)?.status}`);
+    return { ok: true, archived_at: (after as any)?.archived_at ?? (agent as any).archived_at };
   }
 
   @Get(':id') async findOne(@Param('id') id: string) { return await this.agentRepository.get(id); }
@@ -118,11 +219,20 @@ export class AgentController {
   async update(@Param('id') id: string, @Body() agentData: IAgent): Promise<IAgent> {
     const all = await this.agentRepository.getAll();
     const existing = all.find((a:any)=>a.id===id);
+    console.log(`[agents][PUT] id=${id} exists=${!!existing} incomingName=${(agentData as any).nickname || (agentData as any).name} incomingArchived=${(agentData as any).archived_at ?? 'n/a'} existingArchived=${(existing as any)?.archived_at ?? null}`);
     if (existing?.workspace_id) {
       const used = new Set(all.filter((a:any)=>a.workspace_id===existing.workspace_id && a.id!==id && !a.archived_at).map((a:any)=>a.color).filter(Boolean));
       if (!agentData.color || used.has(agentData.color)) agentData.color = randomColor(used);
     }
+    const incomingLevel = (agentData as any).thinkingLevel ?? (existing as any)?.thinkingLevel ?? 'low';
+    (agentData as any).thinkingLevel = incomingLevel;
+    (agentData as any).task_state = { ...((existing as any)?.task_state || {}), ...((agentData as any).task_state || {}), thinkingLevel: incomingLevel };
+    // preserve archived_at unless explicitly provided
+    if ((agentData as any).archived_at === undefined) (agentData as any).archived_at = (existing as any)?.archived_at ?? null;
     await this.agentRepository.update({ ...agentData, id } as any);
-    return await this.agentRepository.get(id);
+    const saved = await this.agentRepository.get(id);
+    console.log(`[agents][PUT] id=${id} saved archived_at=${(saved as any)?.archived_at ?? null} name=${(saved as any)?.nickname}`);
+    agentEventEmitter.emit('agent:thinking-level:changed', { agentId: id, thinkingLevel: incomingLevel });
+    return saved;
   }
 }

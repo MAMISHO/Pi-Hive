@@ -16,6 +16,7 @@ import { WebsocketService } from '../../core/services/websocket.service';
 import { PromptDraftService } from '../../core/services/prompt-draft.service';
 import { ITaskQueue } from '../../core/models/task.model';
 import { Subscription } from 'rxjs';
+import { effortFull, effortShort, normalizeEffort } from '../../core/utils/thinking-level.util';
 
 @Component({
   selector: 'app-swarm-monitor',
@@ -123,19 +124,26 @@ import { Subscription } from 'rxjs';
               </div>
             </div>
             <div class="action-row">
-              @if ((selectedAgent?.status === 'WORKING' || hasActiveWork()) && selectedAgentId) {
-                <button pButton type="button" severity="danger" class="p-button-outlined btn-stop" title="Detener agente" aria-label="Detener agente" (click)="stopAgent()">
-                  <span class="stop-icon" aria-hidden="true"></span>
-                </button>
+              @if (availableEfforts.length > 0) {
+                <select class="effort-quick" [ngModel]="currentEffort" (ngModelChange)="onEffortChange($event)" [title]="effortFullName(currentEffort)" aria-label="Nivel de esfuerzo">
+                  @for (lvl of availableEfforts; track lvl) { <option [value]="lvl" [title]="effortFullName(lvl)">{{ effortLabel(lvl) }}</option> }
+                </select>
               }
-              @if (holdTask) {
-                <button pButton type="button" class="send-btn release-btn" icon="pi pi-play" label="Liberar" (click)="liberar()"></button>
-              } @else {
-                <button pButton type="button" class="send-btn" (click)="sendTask()" [disabled]="!selectedAgentId || !promptText.trim()" title="Enviar (Return)" aria-label="Enviar tarea">
-                  <span class="send-label">Enviar</span>
-                  <span class="return-key" aria-hidden="true"><span class="ret-sym">↵</span></span>
-                </button>
-              }
+              <div class="action-buttons">
+                @if ((selectedAgent?.status === 'WORKING' || hasActiveWork()) && selectedAgentId) {
+                  <button pButton type="button" severity="danger" class="p-button-outlined btn-stop" title="Detener agente" aria-label="Detener agente" (click)="stopAgent()">
+                    <span class="stop-icon" aria-hidden="true"></span>
+                  </button>
+                }
+                @if (holdTask) {
+                  <button pButton type="button" class="send-btn release-btn" icon="pi pi-play" label="Liberar" (click)="liberar()"></button>
+                } @else {
+                  <button pButton type="button" class="send-btn" (click)="sendTask()" [disabled]="!selectedAgentId || !promptText.trim()" title="Enviar (Return)" aria-label="Enviar tarea">
+                    <span class="send-label">Enviar</span>
+                    <span class="return-key" aria-hidden="true"><span class="ret-sym">↵</span></span>
+                  </button>
+                }
+              </div>
             </div>
           </div>
           <pre class="sysmsg" *ngIf="systemMsg">{{systemMsg}}</pre>
@@ -283,6 +291,7 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
   queueDepth = 0;
   queueItems: any[] = [];
   queueCurrentTaskId: number | null = null;
+  availableEfforts: string[] = []; currentEffort: string = 'low';
   queueOpen = false;
   allAgents: any[] = [];
   runStateMsg = '';
@@ -309,6 +318,43 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
   isPromptMultiline(): boolean { return (this.promptText || '').includes('\n'); }
   isPromptExpanded(): boolean { return this.promptFocused || !!(this.promptText && this.promptText.trim().length) || this.isPromptMultiline(); }
 
+  effortLabel(lvl: string){ return effortShort(lvl as any) || lvl; }
+  effortFullName(lvl: string){ return effortFull(lvl as any); }
+  private loadEffortForSelected(): void {
+    const a = this.selectedAgent as any;
+    if (!a) { this.availableEfforts = []; this.currentEffort = 'off'; return; }
+    const ts = a.task_state || {};
+    const rawModel = String(ts.model || '');
+    const idx = rawModel.indexOf('/');
+    const provider = idx >= 0 ? rawModel.slice(0, idx) : '';
+    const modelId = idx >= 0 ? rawModel.slice(idx + 1) : rawModel;
+    this.currentEffort = a.thinkingLevel || ts.thinkingLevel || 'low';
+    if (!provider || !modelId) { this.availableEfforts = []; this.currentEffort = 'off'; return; }
+    this.agentService.getModelThinkingLevels(provider, modelId).subscribe({
+      next: (caps) => {
+        this.availableEfforts = caps?.available || [];
+        this.currentEffort = normalizeEffort(this.currentEffort, this.availableEfforts);
+      },
+      error: () => { this.availableEfforts = []; this.currentEffort = 'off'; }
+    });
+  }
+  onEffortChange(level: string): void {
+    this.currentEffort = level;
+    if (!this.selectedAgentId) return;
+    this.agentService.setThinkingLevel(this.selectedAgentId, level).subscribe({
+      next: (res) => {
+        const eff = res?.thinkingLevel || level;
+        if (this.selectedAgent) {
+          (this.selectedAgent as any).thinkingLevel = eff;
+          const ts = { ...((this.selectedAgent as any).task_state || {}), thinkingLevel: eff };
+          (this.selectedAgent as any).task_state = ts;
+          this.selection.select(this.selectedAgent);
+        }
+      },
+      error: () => {}
+    });
+  }
+
   ngOnInit(): void {
     this.subs.push(this.selection.selectedAgent$.subscribe((a) => {
       if (this.selectedAgentId) this.drafts.set(this.selectedAgentId, this.promptText);
@@ -321,6 +367,7 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
       this.queueCurrentTaskId = null;
       this.autoStickChat = true;
       this.lastChatLen = 0;
+      this.loadEffortForSelected();
       this.loadBaseline();
     }));
 

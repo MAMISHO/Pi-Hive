@@ -11,6 +11,7 @@ import { UiLayoutService } from './core/services/ui-layout.service';
 import { UiFeedbackService } from './core/services/ui-feedback.service';
 import { UiFeedbackComponent } from './shared/ui-feedback/ui-feedback.component';
 import { IAgent } from './core/models/agent.model';
+import { effortFull, effortShort } from './core/utils/thinking-level.util';
 
 @Component({
   selector: 'app-root',
@@ -41,7 +42,7 @@ import { IAgent } from './core/models/agent.model';
           <div class="selected-agent" *ngIf="selectedAgent && !onWorkspacesPage">
             <span class="status-dot" [class]="statusClass(selectedAgent.status)"></span>
             <span class="name" [style.color]="selectedAgent.color || ''">{{ selectedAgent.nickname }}</span>
-            <span class="model">{{ modelOf(selectedAgent) }}</span>
+            <span class="model" [title]="modelTitle(selectedAgent)">{{ modelOf(selectedAgent) }}</span>
           </div>
           <button *ngIf="!onWorkspacesPage" type="button" class="panel-toggle" (click)="ui.toggleRightPanel()" [attr.aria-expanded]="ui.rightPanelOpen" [title]="ui.rightPanelOpen ? 'Cerrar Task lineage' : 'Abrir Task lineage'" [attr.aria-label]="ui.rightPanelOpen ? 'Cerrar Task lineage' : 'Abrir Task lineage'">
             <span class="panel-icon" [class.open]="ui.rightPanelOpen" aria-hidden="true">
@@ -132,6 +133,7 @@ export class AppComponent implements OnInit, OnDestroy {
     });
   }
   statusClass(status: string): string { const s = (status||'').toLowerCase(); return s === 'paused' ? 'hold' : s; }
-  modelOf(agent: IAgent): string { const ts = agent.task_state as any; return ts?.model ? String(ts.model).split('/').pop() : ''; }
+  modelOf(agent: IAgent): string { const ts = agent.task_state as any; const m = ts?.model ? String(ts.model).split('/').pop() : ''; const eff = effortShort((agent as any).thinkingLevel || ts?.thinkingLevel); return eff ? `${m} · ${eff}` : String(m||''); }
+  modelTitle(agent: IAgent): string { const ts = agent.task_state as any; const m = ts?.model ? String(ts.model).split('/').pop() : ''; const eff = effortFull((agent as any).thinkingLevel || ts?.thinkingLevel); const effS = effortShort((agent as any).thinkingLevel || ts?.thinkingLevel); return effS ? `${m} — esfuerzo: ${eff}` : String(m||''); }
   ngOnDestroy(): void { this.subs.forEach(s=>s.unsubscribe()); }
 }

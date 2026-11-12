@@ -11,6 +11,8 @@ export class AgentService {
   getAll(): Observable<IAgent[]> { return this.http.get<IAgent[]>(`${BASE_URL}/agents`); }
   getAllAdmin(): Observable<IAgent[]> { return this.http.get<IAgent[]>(`${BASE_URL}/agents/admin/all`); }
   getModels(): Observable<ModelProvider[]> { return this.http.get<ModelProvider[]>(`${BASE_URL}/agents/models`); }
+  getModelThinkingLevels(provider: string, modelId: string): Observable<{ available: string[]; default: string; reasoning: boolean }> { return this.http.get<{ available: string[]; default: string; reasoning: boolean }>(`${BASE_URL}/agents/models/thinking-levels`, { params: { provider, modelId } }); }
+  setThinkingLevel(id: string, thinkingLevel: string): Observable<any> { return this.http.put(`${BASE_URL}/agents/${id}/thinking-level`, { thinkingLevel }); }
   getById(id: string): Observable<IAgent> { return this.http.get<IAgent>(`${BASE_URL}/agents/${id}`); }
   create(agent: IAgent): Observable<IAgent> { return this.http.post<IAgent>(`${BASE_URL}/agents`, agent); }
   update(id: string, agent: Partial<IAgent>): Observable<IAgent> { return this.http.put<IAgent>(`${BASE_URL}/agents/${id}`, agent); }

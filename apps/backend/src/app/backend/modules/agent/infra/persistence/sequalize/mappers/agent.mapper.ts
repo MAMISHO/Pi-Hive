@@ -16,6 +16,8 @@ export class AgentMapper {
       additional_instruction: json.additional_instruction ?? null,
       color: json.color ?? null,
       inject_context: json.inject_context !== false,
+      thinkingLevel: (json as any).thinking_level ?? (json as any).thinkingLevel ?? 'low',
+      archived_at: (json as any).archived_at ?? null,
     };
   }
 
@@ -32,6 +34,8 @@ export class AgentMapper {
       additional_instruction: agent.additional_instruction ?? null,
       color: agent.color ?? null,
       inject_context: agent.inject_context !== false,
-    };
+      thinking_level: (agent as any).thinkingLevel || 'low',
+      archived_at: (agent as any).archived_at ?? null,
+    } as any;
   }
 }

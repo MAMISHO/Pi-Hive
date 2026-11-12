@@ -185,6 +185,14 @@ export class AgentRunnerService implements OnModuleInit {
     agentEventEmitter.on('agent:session:clear', (agentId: string) => { this.clearAgentSession(agentId).catch(console.error); });
     agentEventEmitter.on('agent:session:compact', (agentId: string) => { this.compactAgentSession(agentId).catch(console.error); });
     agentEventEmitter.on('agent:session:resume', (agentId: string) => { this.refreshSystemPrompt(agentId).catch(console.error); });
+    agentEventEmitter.on('agent:thinking-level:changed', (payload: any) => {
+      const agentId = payload?.agentId; const level = payload?.thinkingLevel;
+      if (!agentId || !level) return;
+      const session = this.activeSessions.get(agentId);
+      if (session && typeof (session as any).setThinkingLevel === 'function') {
+        try { (session as any).setThinkingLevel(level); } catch (e) { console.warn('[AgentRunner] setThinkingLevel failed', agentId, level, e); }
+      }
+    });
     try {
       try { const stuck = await this.taskQueueRepository.findByStatus('PROCESSING' as any); for (const t of stuck) { t.status = 'PENDING' as any; await this.taskQueueRepository.update(t); console.log(`[AgentRunner] recovered stuck PROCESSING task ${t.id}`); } } catch (e) { console.warn('[AgentRunner] recover stuck failed', e); }
       const pending = await this.taskQueueRepository.findByStatus('PENDING');
@@ -731,6 +739,12 @@ export class AgentRunnerService implements OnModuleInit {
         agentEventEmitter.emit('agent:run:model', { runId, agentId: agent.id, taskId: task.id, state: 'fallback', provider: resolved.provider, modelId: resolved.modelId, message: modelFallbackMessage, emittedAt: Date.now() });
       }
       this.applySystemPrompt(session, systemPrompt);
+      try {
+        const desiredEffort = String((agent as any).thinkingLevel || (agent as any)?.task_state?.thinkingLevel || 'low');
+        if (desiredEffort && desiredEffort !== 'off' && typeof (session as any).setThinkingLevel === 'function') {
+          (session as any).setThinkingLevel(desiredEffort);
+        }
+      } catch (e) { console.warn('[AgentRunner] failed to set thinking level', e); }
       console.log(`[AgentRunner] session ready (sys applied, team refreshed), prompting task=${task.id} run=${runId}`);
       this.activeSessions.set(agent.id, session);
       agentEventEmitter.emit('agent:run:started', { agentId: agent.id, workspaceId, taskId: task.id, runId, model: { provider: resolved.provider, modelId: resolved.modelId, raw: resolved.raw }, resumedSession: isResumed, emittedAt: Date.now() });

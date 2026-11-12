@@ -68,6 +68,10 @@ export const databaseProviders = [
             await sequelize.query("ALTER TABLE agents ADD COLUMN inject_context BOOLEAN NOT NULL DEFAULT 1;");
             console.log('[DB] added agents.inject_context');
           }
+          if (!anames.has('thinking_level')) {
+            await sequelize.query("ALTER TABLE agents ADD COLUMN thinking_level VARCHAR(16) DEFAULT 'low';");
+            console.log('[DB] added agents.thinking_level');
+          }
         } catch (e) { console.warn('[DB] agents migrate:', (e as any)?.message || e); }
         console.log('Database synchronized (alter).');
 

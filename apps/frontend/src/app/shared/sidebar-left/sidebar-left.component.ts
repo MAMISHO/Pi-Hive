@@ -9,6 +9,7 @@ import { UiFeedbackService } from '../../core/services/ui-feedback.service';
 import { IAgent, AgentStatus } from '../../core/models/agent.model';
 import { Subscription } from 'rxjs';
 import { CreateAgentModalComponent } from '../create-agent-modal/create-agent-modal.component';
+import { effortFull, effortShort } from '../../core/utils/thinking-level.util';
 
 @Component({
   selector: 'app-sidebar-left',
@@ -39,7 +40,7 @@ import { CreateAgentModalComponent } from '../create-agent-modal/create-agent-mo
                 <span class="status-label">{{ statusLabel(agent) }}</span>
                 @if (queueDepth(agent.id) > 0) { <span class="q-mini">{{ queueDepth(agent.id) }} in queue</span> }
               </div>
-              <div class="agent-model">{{ modelOf(agent) }}</div>
+              <div class="agent-model" [title]="modelTitle(agent)">{{ modelOf(agent) }}</div>
             </div>
             <div class="row-actions">
               <button type="button" class="more-btn" title="Opciones del agente" aria-label="Opciones del agente" (click)="toggleMenu(agent, $event)">
@@ -72,7 +73,7 @@ import { CreateAgentModalComponent } from '../create-agent-modal/create-agent-mo
               <span class="status-label">{{ statusLabel(agent) }}</span>
               @if (queueDepth(agent.id) > 0) { <span class="q-mini">{{ queueDepth(agent.id) }} in queue</span> }
             </div>
-            <div class="agent-model">{{ modelOf(agent) }}</div>
+            <div class="agent-model" [title]="modelTitle(agent)">{{ modelOf(agent) }}</div>
           </div>
           <div class="row-actions">
             <button type="button" class="more-btn" title="Opciones del agente" aria-label="Opciones del agente" (click)="toggleMenu(agent, $event)">
@@ -146,7 +147,7 @@ export class SidebarLeftComponent implements OnInit, OnDestroy {
     const ws=this.workspace.active;
     this.agentService.getAll().subscribe((list) => {
       const activeId = ws?.id || this.workspace.active?.id;
-      this.agents = activeId ? list.filter((a:any)=>a.workspace_id===activeId) : list;
+      this.agents = (activeId ? list.filter((a:any)=>a.workspace_id===activeId) : list).filter((a:any)=>!a.archived_at);
       this.split();
       if(this.agents.length && !this.selection.selectedAgent) this.selection.select(this.agents[0]);
     });
@@ -167,7 +168,8 @@ export class SidebarLeftComponent implements OnInit, OnDestroy {
   }
   toggleMenu(agent: IAgent, ev: Event): void { ev.stopPropagation(); this.menuFor = this.menuFor === agent.id ? null : agent.id; }
   @HostListener('document:click') closeMenu(): void { this.menuFor = null; }
-  modelOf(agent: IAgent): string { const ts = agent.task_state as any; return ts?.model ? String(ts.model).split('/').pop() : agent.name; }
+  modelOf(agent: IAgent): string { const ts = agent.task_state as any; const m = ts?.model ? String(ts.model).split('/').pop() : agent.name; const eff = effortShort((agent as any).thinkingLevel || ts?.thinkingLevel); return eff ? `${m} · ${eff}` : String(m||''); }
+  modelTitle(agent: IAgent): string { const ts = agent.task_state as any; const m = ts?.model ? String(ts.model).split('/').pop() : agent.name; const eff = effortFull((agent as any).thinkingLevel || ts?.thinkingLevel); const effS = effortShort((agent as any).thinkingLevel || ts?.thinkingLevel); return effS ? `${m} — esfuerzo: ${eff}` : String(m||''); }
   select(agent: IAgent): void { this.selection.select(agent); }
   isBusy(agent: IAgent): boolean { return (agent.status as any) === 'WORKING'; }
   openCreate(): void { this.editingAgent = null; this.showCreateModal = true; }
