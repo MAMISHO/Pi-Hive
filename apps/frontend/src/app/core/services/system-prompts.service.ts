@@ -6,6 +6,12 @@ export interface ISystemPrompt { id: string; workspace_id: string | null; name: 
 @Injectable({ providedIn: 'root' })
 export class SystemPromptsService {
   constructor(private http: HttpClient) {}
+  // Global/base system prompts (selectable per workspace). Default is immutable.
+  listGlobal(): Observable<ISystemPrompt[]> { return this.http.get<ISystemPrompt[]>(`${BASE_URL}/system-prompts`); }
+  createGlobal(name: string, content: string) { return this.http.post(`${BASE_URL}/system-prompts`, { name, content }); }
+  updateGlobal(id: string, body: Partial<ISystemPrompt>) { return this.http.put(`${BASE_URL}/system-prompts/${id}`, body); }
+  deleteGlobal(id: string) { return this.http.delete(`${BASE_URL}/system-prompts/${id}`); }
+  // Legacy/workspace-scoped
   list(workspaceId: string): Observable<ISystemPrompt[]> { return this.http.get<ISystemPrompt[]>(`${BASE_URL}/workspaces/${workspaceId}/system-prompts`); }
   create(workspaceId: string, name: string, content: string) { return this.http.post(`${BASE_URL}/workspaces/${workspaceId}/system-prompts`, { name, content }); }
   update(workspaceId: string, id: string, body: Partial<ISystemPrompt>) { return this.http.put(`${BASE_URL}/workspaces/${workspaceId}/system-prompts/${id}`, body); }

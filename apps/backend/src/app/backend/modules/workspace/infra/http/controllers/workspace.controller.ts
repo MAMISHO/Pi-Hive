@@ -34,9 +34,9 @@ export class WorkspaceController {
   }
 
   @Post()
-  async create(@Body() body: { name: string; path: string; hitl_enabled?: boolean }): Promise<IWorkspace> {
+  async create(@Body() body: { name: string; path: string; hitl_enabled?: boolean; workspace_prompt?: string | null }): Promise<IWorkspace> {
     await this.deactivateAll();
-    return await this.workspaceRepository.add({ name: body.name, path: body.path, is_active: true, hitl_enabled: body.hitl_enabled ?? false, active_system_prompt_id: DEFAULT_SYSTEM_PROMPT_ID } as any);
+    return await this.workspaceRepository.add({ name: body.name, path: body.path, is_active: true, hitl_enabled: body.hitl_enabled ?? false, active_system_prompt_id: DEFAULT_SYSTEM_PROMPT_ID, workspace_prompt: body.workspace_prompt ?? null } as any);
   }
 
   @Get(':id/agents')

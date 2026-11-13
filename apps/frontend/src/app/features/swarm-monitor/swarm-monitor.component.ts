@@ -30,6 +30,7 @@ import { effortFull, effortShort, normalizeEffort } from '../../core/utils/think
           <span class="count">{{ chatEvents.length }}</span>
         </div>
         <div class="chat-history" #chatHistory (scroll)="onChatScroll($event)">
+          <div class="history-loading" *ngIf="chatLoadingMore">Cargando historial…</div>
           @for (ev of chatEvents; track eventKey(ev, $index); let i = $index) {
             <div class="chat-item" [class.system-ev]="ev.kind === 'system_prompt'" [class.inbound]="ev.direction==='INBOUND'" [class.outbound]="ev.direction==='OUTBOUND'" [class.kind-request]="ev.kind==='request'" [class.user-request]="ev.kind==='request' && !isDelegatedRequest(ev)" [class.delegated-request]="ev.kind==='request' && isDelegatedRequest(ev)" [class.kind-response]="ev.kind==='response'" [class.kind-thinking]="ev.kind==='thinking'" [class.kind-tool]="ev.kind==='tool_group' || ev.kind==='tool_call'" [class.kind-plan]="ev.kind==='plan'">
               <div class="chat-meta">
@@ -47,6 +48,7 @@ import { effortFull, effortShort, normalizeEffort } from '../../core/utils/think
                   @else if (ev.kind === 'response') { <span class="kchip resp">RESPONSE</span><span class="klabel">Respuesta del agente</span> }
                   @else if (ev.kind === 'thinking') { <span class="kchip think">THINKING</span><span class="klabel">Razonamiento</span> }
                   @else if (ev.kind === 'tool_group') { <span class="kchip tool">TOOLS</span><span class="klabel">Herramientas</span> }
+                  @else if (ev.kind === 'intermediate_group') { <span class="kchip tool">ACTIONS</span><span class="klabel">Acciones intermedias (plegadas)</span> }
                   @else { <span class="kchip other">{{ ev.kind }}</span> }
                 </span>
                 <span class="ts" *ngIf="ev.created_at">{{ ev.created_at | date:'HH:mm:ss' }}</span>
@@ -58,15 +60,42 @@ import { effortFull, effortShort, normalizeEffort } from '../../core/utils/think
                   <summary>Ver plan{{ planStepsLabel(ev.meta) }}</summary>
                   <pre class="ev-body">{{ ev.content }}</pre>
                 </details>
-              } @else if (ev.kind === 'thinking') {
-                <details class="collapsible-item">
-                  <summary>{{ thinkingSummary(ev.content) }}</summary>
-                  <pre class="ev-body">{{ thinkingText(ev.content) }}</pre>
+              } @else if (ev.kind === 'intermediate_group') {
+                <details class="collapsible-item intermediate-group" (toggle)="onGroupToggle(ev, $event)">
+                  <summary>{{ groupSummary(ev) }}</summary>
+                  @if (!ev.childrenLoaded) {
+                    <pre class="ev-body muted">Contenido intermedio plegado (no cargado). Se obtendrá al desplegar.</pre>
+                  } @else {
+                    <div class="group-children">
+                      @for (child of (ev.children || []); track child.id ?? $index) {
+                        <div class="group-child" [class.kind-thinking]="child.kind==='thinking'" [class.kind-tool]="child.kind==='tool_group' || child.kind==='tool_call' || child.kind==='tool_result'">
+                          <div class="group-child-meta">
+                            <span class="kchip think" *ngIf="child.kind==='thinking'">THINKING</span>
+                            <span class="kchip tool" *ngIf="child.kind!=='thinking'">TOOL</span>
+                          </div>
+                          @if (child.kind === 'thinking') {
+                            <pre class="ev-body">{{ thinkingText(child.content) }}</pre>
+                          } @else if (child.kind === 'tool_group') {
+                            <pre class="ev-body">{{ toolGroupText(child.content) }}</pre>
+                          } @else {
+                            <pre class="ev-body">{{ toolText(child.content) }}</pre>
+                          }
+                        </div>
+                      } @empty { <pre class="ev-body muted">Sin acciones intermedias.</pre> }
+                    </div>
+                  }
                 </details>
-              } @else if (ev.kind === 'tool_group') {
-                <details class="collapsible-item" [title]="'Ver detalles de las ' + toolGroupCount(ev.content) + ' herramienta(s) ejecutadas'">
-                  <summary>{{ toolGroupSummary(ev.content) }}</summary>
-                  <pre class="ev-body">{{ toolGroupText(ev.content) }}</pre>
+              } @else if (ev.kind === 'thinking') {
+                <details class="collapsible-item" (toggle)="onDetailsToggle(ev, $event)">
+                  <summary>{{ isDeferred(ev) ? 'Razonamiento (cargar al expandir)' : thinkingSummary(ev.content) }}</summary>
+                  @if (isDeferred(ev)) { <pre class="ev-body muted">Contenido diferido: se cargará bajo demanda.</pre> }
+                  @else { <pre class="ev-body">{{ thinkingText(ev.content) }}</pre> }
+                </details>
+              } @else if (ev.kind === 'tool_group' || ev.kind === 'tool_call') {
+                <details class="collapsible-item" (toggle)="onDetailsToggle(ev, $event)" [title]="'Ver detalles de herramientas ejecutadas'">
+                  <summary>{{ isDeferred(ev) ? 'Herramientas (cargar al expandir)' : (ev.kind === 'tool_group' ? toolGroupSummary(ev.content) : toolSummary(ev.content)) }}</summary>
+                  @if (isDeferred(ev)) { <pre class="ev-body muted">Contenido diferido: se cargará bajo demanda.</pre> }
+                  @else { <pre class="ev-body">{{ ev.kind === 'tool_group' ? toolGroupText(ev.content) : toolText(ev.content) }}</pre> }
                 </details>
               } @else if (ev.kind === 'response') {
                 <div class="response-wrap">
@@ -191,14 +220,21 @@ import { effortFull, effortShort, normalizeEffort } from '../../core/utils/think
     .mini-action { border: 1px solid var(--border-color); background: rgba(255,255,255,0.03); color: var(--text-muted); border-radius: 6px; padding: 2px 6px; font-size: 10px; line-height: 1.2; cursor: pointer; font-family: var(--font-mono); }
     .mini-action:hover { color: var(--text-primary); border-color: var(--text-muted); background: rgba(255,255,255,0.06); }
     .mini-ico { display: inline-block; min-width: 14px; text-align: center; }
-    .response-body { font-size: 14px; line-height: 1.7; color: var(--text-primary); padding-right: 72px; }
-    .response-plain { padding-right: 72px; }
+    .response-body { font-size: 14px; line-height: 1.7; color: var(--text-primary); padding-left: 22px; }
+    .response-plain { padding-left: 22px; }
     .request-body { font-size: 13px; line-height: 1.65; color: var(--text-primary); font-family: var(--font-mono); }
     .empty { color: var(--text-muted); font-size: 13px; padding: 16px 4px; }
     .sys-details summary { cursor:pointer; font-size:12px; color: var(--accent-blue, #818cf8); margin-bottom:6px; }
     .sys-details pre { white-space: pre-wrap; margin:0; font-size:11px; font-family: var(--font-mono); color: var(--text-secondary); max-height: 240px; overflow:auto; }
     .ev-body { white-space: pre-wrap; margin:0; font-size:12px; line-height:1.6; font-family: var(--font-mono); color: var(--text-secondary); }
+    .ev-body.muted { color: var(--text-muted); font-style: italic; }
+    .history-loading { text-align:center; font-size:12px; color: var(--text-muted); padding: 6px 0 10px; }
     .collapsible-item summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); }
+    .intermediate-group summary { font-weight: 600; color: var(--text-primary); }
+    .group-children { display:flex; flex-direction:column; gap:10px; margin-top:8px; }
+    .group-child { padding:8px 10px; border:1px solid var(--border-color); border-radius:8px; background: rgba(255,255,255,0.02); }
+    .group-child-meta { margin-bottom:6px; }
+    .chat-item.kind-intermediate { border-color: rgba(210,153,34,0.18); background: rgba(210,153,34,0.03); }
 
     .markdown-body { word-wrap: break-word; overflow-wrap: anywhere; }
     .markdown-body :is(p, ul, ol, pre, blockquote, table, h1, h2, h3, h4, hr, .mermaid-block) { margin: 0 0 0.8em; }
@@ -270,9 +306,15 @@ import { effortFull, effortShort, normalizeEffort } from '../../core/utils/think
 export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
   tasks: ITaskQueue[] = [];
   chatEvents: any[] = [];
+  chatLoading = false;
+  chatLoadingMore = false;
+  chatHasMore = false;
+  chatOldestId: number | null = null;
+  private detailLoading = new Set<any>();
   @ViewChild('chatHistory') chatHistoryRef?: ElementRef<HTMLDivElement>;
   private autoStickChat = true;
   private lastChatLen = 0;
+  private readonly CHAT_PAGE = 50;
   selectedAgentId: string | null = null;
   selectedAgent: any = null;
   promptText = '';
@@ -367,6 +409,8 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
       this.queueCurrentTaskId = null;
       this.autoStickChat = true;
       this.lastChatLen = 0;
+      this.chatHasMore = false;
+      this.chatOldestId = null;
       this.loadEffortForSelected();
       this.loadBaseline();
     }));
@@ -416,7 +460,7 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
     this.subs.push(this.ws.taskChanged$.subscribe((e: any) => { if (e?.task) upsertTask(e.task); if (e?.status === 'COMPLETED' || e?.status === 'HOLD' || e?.status === 'STOPPED') { this.autoStickChat = true; this.scheduleBaseline(250); } }));
 
     this.subs.push(this.ws.tasksCleared$.subscribe((e: any) => { if (!e?.workspaceId || e.workspaceId === this.workspaceService.active?.id) { this.tasks = []; } }));
-    this.subs.push(this.ws.transcriptCleared$.subscribe((e: any) => { if (!this.selectedAgentId || e?.agentId === this.selectedAgentId) { this.tasks = []; this.chatEvents = []; this.lastChatLen = 0; this.autoStickChat = true; this.systemMsg = 'Chat limpiado y archivado en Memory > Session History.'; this.scheduleBaseline(500); } }));
+    this.subs.push(this.ws.transcriptCleared$.subscribe((e: any) => { if (!this.selectedAgentId || e?.agentId === this.selectedAgentId) { this.tasks = []; this.chatEvents = []; this.lastChatLen = 0; this.chatHasMore = false; this.chatOldestId = null; this.autoStickChat = true; this.systemMsg = 'Chat limpiado y archivado en Memory > Session History.'; this.scheduleBaseline(500); } }));
 
     this.subs.push(this.ws.rehydrate$.subscribe(() => this.scheduleBaseline(150)));
 
@@ -425,7 +469,7 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
 
   private scheduleBaseline(ms: number) {
     clearTimeout(this.pendingLoad);
-    this.pendingLoad = setTimeout(() => this.loadBaseline(), ms);
+    this.pendingLoad = setTimeout(() => this.loadBaseline(true), ms);
   }
 
   ngAfterViewInit(): void { this.lastChatLen = this.chatEvents.length; this.scrollChatToBottom(); }
@@ -435,6 +479,7 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
     if (!el) return;
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
     this.autoStickChat = dist < 32;
+    if (el.scrollTop < 80) this.loadOlderChat();
   }
 
   private scrollChatToBottom(): void {
@@ -572,15 +617,62 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
     return this.sanitizer.bypassSecurityTrustHtml(html || `<p>${inline(src)}</p>`);
   }
 
-  loadBaseline(): void {
+  loadBaseline(preserveScroll = false): void {
     if (this.selectedAgentId) {
       this.taskService.getByReceiver(this.selectedAgentId).subscribe({ next: (list) => { this.tasks = list || []; }, error: () => {} });
-      this.transcript.getByAgent(this.selectedAgentId).subscribe({ next: (ev) => { this.chatEvents = ev || []; this.lastChatLen = this.chatEvents.length; this.maybeScrollChat(true); }, error: () => {} });
+      const el = this.chatHistoryRef?.nativeElement;
+      const prevHeight = el?.scrollHeight || 0;
+      const prevTop = el?.scrollTop || 0;
+      this.chatLoading = true;
+      this.transcript.getByAgent(this.selectedAgentId, undefined, this.CHAT_PAGE, 'light').subscribe({
+        next: (ev) => {
+          this.chatEvents = ev || [];
+          this.lastChatLen = this.chatEvents.length;
+          this.chatOldestId = this.chatEvents.length ? this.chatEvents[0].id ?? null : null;
+          this.chatHasMore = this.chatEvents.length >= this.CHAT_PAGE;
+          this.chatLoading = false;
+          if (preserveScroll && el) {
+            requestAnimationFrame(() => { el.scrollTop = Math.max(0, prevTop); });
+          } else {
+            this.maybeScrollChat(true);
+          }
+        },
+        error: () => { this.chatLoading = false; }
+      });
     } else {
       this.taskService.getAll().subscribe({ next: (list) => { this.tasks = list || []; }, error: () => {} });
       this.chatEvents = [];
       this.lastChatLen = 0;
+      this.chatHasMore = false;
+      this.chatOldestId = null;
     }
+  }
+
+  private loadOlderChat(): void {
+    if (!this.selectedAgentId || this.chatLoadingMore || !this.chatHasMore || this.chatOldestId == null) return;
+    const el = this.chatHistoryRef?.nativeElement;
+    if (!el) return;
+    const prevHeight = el.scrollHeight;
+    const prevTop = el.scrollTop;
+    this.chatLoadingMore = true;
+    this.transcript.getByAgent(this.selectedAgentId, this.chatOldestId, this.CHAT_PAGE, 'light').subscribe({
+      next: (older) => {
+        const arr = older || [];
+        if (!arr.length) { this.chatHasMore = false; this.chatLoadingMore = false; return; }
+        // prepend, dedupe by id
+        const seen = new Set(this.chatEvents.map(e => e.id));
+        const toPrepend = arr.filter(e => !seen.has(e.id));
+        this.chatEvents = [...toPrepend, ...this.chatEvents];
+        this.chatOldestId = this.chatEvents.length ? this.chatEvents[0].id ?? this.chatOldestId : this.chatOldestId;
+        this.chatHasMore = arr.length >= this.CHAT_PAGE;
+        this.chatLoadingMore = false;
+        requestAnimationFrame(() => {
+          const newHeight = el.scrollHeight;
+          el.scrollTop = prevTop + (newHeight - prevHeight);
+        });
+      },
+      error: () => { this.chatLoadingMore = false; }
+    });
   }
 
   statusClass(status: string): string {
@@ -677,6 +769,59 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
     return a ? (a.nickname || a.name || id) : id;
   }
   private tryParse(v: any): any { if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch { return null; } }
+
+  isDeferred(ev: any): boolean { return !!ev?.contentDeferred && !ev?.detailLoaded; }
+  ensureDetail(ev: any): void {
+    if (!ev || !ev.contentDeferred || ev.detailLoaded || ev.id == null) return;
+    if (this.detailLoading.has(ev.id)) return;
+    this.detailLoading.add(ev.id);
+    this.transcript.getEventDetail(ev.id).subscribe({
+      next: (full) => {
+        if (full && full.content != null) {
+          ev.content = full.content;
+          ev.detailLoaded = true;
+          ev.contentDeferred = false;
+        }
+        this.detailLoading.delete(ev.id);
+        this.chatEvents = [...this.chatEvents];
+      },
+      error: () => { this.detailLoading.delete(ev.id); }
+    });
+  }
+  onDetailsToggle(ev: any, e: Event): void {
+    const el = e?.target as HTMLDetailsElement;
+    if (el?.open) this.ensureDetail(ev);
+  }
+  groupSummary(ev: any): string {
+    const n = ev?.count ?? 0;
+    const kinds = ev?.kinds || {};
+    const parts: string[] = [];
+    const tools = (kinds['tool_call'] || 0) + (kinds['tool_group'] || 0) + (kinds['tool_result'] || 0);
+    const thinking = kinds['thinking'] || 0;
+    if (tools) parts.push(`${tools} herramienta${tools === 1 ? '' : 's'}`);
+    if (thinking) parts.push(`${thinking} razonamiento${thinking === 1 ? '' : 's'}`);
+    const detail = parts.length ? ` (${parts.join(', ')})` : '';
+    return `Acciones intermedias · ${n} ítem${n === 1 ? '' : 's'}${detail}`;
+  }
+
+  onGroupToggle(ev: any, e: Event): void {
+    const el = e?.target as HTMLDetailsElement;
+    if (!el?.open || !ev || ev.childrenLoaded || !this.selectedAgentId || ev.task_id == null) return;
+    const key = `g:${ev.task_id}`;
+    if (this.detailLoading.has(key)) return;
+    this.detailLoading.add(key);
+    this.transcript.getTaskIntermediates(this.selectedAgentId, Number(ev.task_id)).subscribe({
+      next: (items) => {
+        ev.children = items || [];
+        ev.childrenLoaded = true;
+        ev.contentDeferred = false;
+        this.detailLoading.delete(key);
+        this.chatEvents = [...this.chatEvents];
+      },
+      error: () => { this.detailLoading.delete(key); }
+    });
+  }
+
   thinkingSummary(c: any): string { const o = this.tryParse(c); if (o?.summary) return String(o.summary) + (String(o.text || '').length > 80 ? '…' : ''); const t = o?.text || String(c || ''); return (t.replace(/\s+/g, ' ').trim().slice(0, 80) || 'Thinking') + (t.length > 80 ? '…' : ''); }
   thinkingText(c: any): string { const o = this.tryParse(c); return o?.text || String(c || ''); }
   toolSummary(c: any): string { const o = this.tryParse(c); if (o?.toolName) return `${o.toolName} (${o.phase || 'call'})`; const t = String(c || ''); try { const j = JSON.parse(t); if (j.tool || j.toolName) return `${j.tool || j.toolName}`; } catch {} return t.replace(/\s+/g, ' ').trim().slice(0, 80) || 'Tool call'; }

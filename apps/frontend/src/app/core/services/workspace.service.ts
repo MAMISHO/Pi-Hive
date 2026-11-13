@@ -4,7 +4,7 @@ import { BehaviorSubject, Observable, tap } from 'rxjs';
 
 export interface IWorkspace {
   id: string; name: string; path: string; is_active: boolean;
-  active_system_prompt_id?: string | null; custom_chief_prompt?: string | null; hitl_enabled?: boolean;
+  active_system_prompt_id?: string | null; custom_chief_prompt?: string | null; workspace_prompt?: string | null; hitl_enabled?: boolean;
   created_at?: string | null;
 }
 const BASE_URL = 'http://localhost:8090';
@@ -21,7 +21,7 @@ export class WorkspaceService {
   getById(id: string): Observable<IWorkspace> { return this.http.get<IWorkspace>(`${BASE_URL}/workspaces/${id}`); }
   getActive(): Observable<IWorkspace | null> { return this.http.get<IWorkspace | null>(`${BASE_URL}/workspaces/active`); }
   refreshActive(): void { this.getActive().subscribe(ws => { const cur=this.activeSubject.getValue(); if((cur?.id||null)!==(ws?.id||null) || (!!cur)!==(!!ws)) this.activeSubject.next(ws); }); }
-  create(name: string, path: string, hitl_enabled = false): Observable<IWorkspace> { return this.http.post<IWorkspace>(`${BASE_URL}/workspaces`, { name, path, hitl_enabled }).pipe(tap(ws => this.activeSubject.next(ws))); }
+  create(name: string, path: string, hitl_enabled = false, workspace_prompt: string | null = null): Observable<IWorkspace> { return this.http.post<IWorkspace>(`${BASE_URL}/workspaces`, { name, path, hitl_enabled, workspace_prompt }).pipe(tap(ws => this.activeSubject.next(ws))); }
   activate(id: string): Observable<any> { return this.http.put(`${BASE_URL}/workspaces/${id}/activate`, {}).pipe(tap(() => this.refreshActive())); }
   update(id: string, body: Partial<IWorkspace>) { return this.http.put<IWorkspace>(`${BASE_URL}/workspaces/${id}`, body).pipe(tap(() => this.refreshActive())); }
   delete(id: string) { return this.http.delete(`${BASE_URL}/workspaces/${id}`).pipe(tap(() => this.refreshActive())); }

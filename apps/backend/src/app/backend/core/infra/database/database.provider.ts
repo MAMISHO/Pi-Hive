@@ -77,6 +77,14 @@ export const databaseProviders = [
             console.log('[DB] added agents.usage_reset_at');
           }
         } catch (e) { console.warn('[DB] agents migrate:', (e as any)?.message || e); }
+        try {
+          const [wcols]: any = await sequelize.query("PRAGMA table_info(workspaces);");
+          const wnames = new Set((wcols || []).map((c: any) => c.name));
+          if (!wnames.has('workspace_prompt')) {
+            await sequelize.query("ALTER TABLE workspaces ADD COLUMN workspace_prompt TEXT;");
+            console.log('[DB] added workspaces.workspace_prompt');
+          }
+        } catch (e) { console.warn('[DB] workspaces migrate:', (e as any)?.message || e); }
         console.log('Database synchronized (alter).');
 
         // Seed/refresh immutable default system prompt (global) from catalog files

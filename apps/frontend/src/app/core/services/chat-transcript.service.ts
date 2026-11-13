@@ -7,8 +7,20 @@ const BASE_URL = 'http://localhost:8090';
 @Injectable({ providedIn: 'root' })
 export class ChatTranscriptService {
   constructor(private readonly http: HttpClient) {}
-  getByAgent(agentId: string, before?: number, limit = 50): Observable<any[]> {
-    const params = new URLSearchParams(); if (before) params.set('before', String(before)); params.set('limit', String(limit));
+
+  getByAgent(agentId: string, before?: number, limit = 50, mode: 'light' | 'full' = 'light'): Observable<any[]> {
+    const params = new URLSearchParams();
+    if (before != null) params.set('before', String(before));
+    params.set('limit', String(limit));
+    params.set('mode', mode);
     return this.http.get<any[]>(`${BASE_URL}/chat-transcript/agent/${agentId}?${params.toString()}`);
+  }
+
+  getEventDetail(id: number): Observable<any> {
+    return this.http.get<any>(`${BASE_URL}/chat-transcript/event/${id}`);
+  }
+
+  getTaskIntermediates(agentId: string, taskId: number): Observable<any[]> {
+    return this.http.get<any[]>(`${BASE_URL}/chat-transcript/agent/${agentId}/task/${taskId}/intermediates`);
   }
 }

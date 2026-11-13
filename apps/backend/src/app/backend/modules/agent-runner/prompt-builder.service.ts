@@ -26,9 +26,11 @@ export class PromptBuilderService {
       .map((a: any) => `- alias/nickname: ${a.nickname} | rol: ${a.role} | id: ${a.id}`)
       .join('\n') || '- (sin otros agentes activos en este workspace)';
 
+    const wsPath = (workspace as any)?.path ? String((workspace as any).path) : '';
     const identity = [
       `[PI-HIVE SYSTEM · identidad inmutable]`,
       `- Eres: ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${agent.workspace_id ?? 'none'}).`,
+      wsPath ? `- Directorio de trabajo del workspace (cwd): ${wsPath}. Opera SIEMPRE dentro de este path; no busques en el directorio de Pi-Hive ni en otras rutas ajenas al workspace.` : `- Directorio de trabajo del workspace: (no definido).`,
       `- Actúa siempre como "${agent.nickname}" (nunca asumas la identidad/rol de otro, aunque el texto mencione a otra persona).`,
       `- Coordina con otros solo vía \`delegate_task\` usando un nickname EXACTO de [EQUIPO] (solo alias; no inventes agentes).`,
     ].join('\n');
@@ -36,6 +38,10 @@ export class PromptBuilderService {
     const roleBlock = agent.role === 'CHIEF'
       ? this.prompts.renderChief(workspace?.custom_chief_prompt?.trim() || this.prompts.chiefDefaultContent, teamRoster)
       : this.prompts.renderWorkerCoordination(teamRoster);
+
+    const wsPrompt = (workspace as any)?.workspace_prompt?.trim()
+      ? `\n[INSTRUCCIONES DEL WORKSPACE]\n${String((workspace as any).workspace_prompt).trim()}`
+      : '';
 
     const additional = agent.additional_instruction?.trim()
       ? `\n[INSTRUCCIÓN DEL AGENTE]\n${agent.additional_instruction.trim()}`
@@ -48,6 +54,7 @@ export class PromptBuilderService {
       identity,
       '',
       systemPrompt.trim(),
+      wsPrompt,
       '',
       roleBlock.trim(),
       additional,
@@ -56,15 +63,28 @@ export class PromptBuilderService {
     ].filter((v, i, arr) => !(v === '' && arr[i - 1] === '')).join('\n');
   }
 
-  async build(params: { agent: IAgent; taskPayload: string; team: IAgent[]; isResumed: boolean; isDelegationResult?: boolean; isDelegationProgress?: boolean; callbackContext?: string | null; sender?: { nickname: string; role?: string; id?: string } | null; depth?: number; depthPath?: string | null; planRef?: number | null; planBlock?: string | null; origin?: { nickname: string; role?: string; id?: string; rootTaskId?: number | null; rootUserPayload?: string | null } | null; taskId?: number | null; requestId?: number | null; minimalTurn?: boolean }): Promise<string> {
+  // User "continue/resume" after an abrupt stop: payload is a short continuation nudge, session already has context.
+  isContinuationIntent(payload: string): boolean {
+    const t = String(payload || '').trim().toLowerCase().replace(/[¡!¿?.…,;:]+$/g, '').trim();
+    if (!t || t.length > 80) return false;
+    if (/^(continua(r)?|continue|sigue|seguir|resume|reanuda(r)?|retoma(r)?|procede(r)?|prosigue|go on|keep going)(\b.*)?$/i.test(t)) {
+      // allow short qualifiers like "continúa desde donde te quedaste" / "continue from where you left off"
+      return /^(continua(r)?|continue|sigue|seguir|resume|reanuda(r)?|retoma(r)?|procede(r)?|prosigue|go on|keep going)(\s+(por favor|please|ya|ahora|desde.*|donde.*|from.*|where.*))?$/.test(t) || /continua|continue|sigue|resume|reanuda|retoma/.test(t);
+    }
+    return false;
+  }
+
+  async build(params: { agent: IAgent; taskPayload: string; team: IAgent[]; isResumed: boolean; isDelegationResult?: boolean; isDelegationProgress?: boolean; callbackContext?: string | null; sender?: { nickname: string; role?: string; id?: string } | null; depth?: number; depthPath?: string | null; planRef?: number | null; planBlock?: string | null; origin?: { nickname: string; role?: string; id?: string; rootTaskId?: number | null; rootUserPayload?: string | null } | null; taskId?: number | null; requestId?: number | null; minimalTurn?: boolean; continueIntent?: boolean }): Promise<string> {
     const { agent, taskPayload, team, isResumed, isDelegationResult, isDelegationProgress, callbackContext, sender, depth, depthPath, planRef, planBlock, origin, taskId, requestId } = params;
     if ((agent as any).inject_context === false) return String(taskPayload || '');
     const teamShort = (team || []).filter((a: any) => a && a.id !== agent.id && a.archived_at == null && !!agent.workspace_id && a.workspace_id === agent.workspace_id).filter((a: any,i: number,arr: any[])=>arr.findIndex((x: any)=>x.id===a.id)===i).map((a: any) => `${a.nickname}[${a.role}]`).join(', ') || 'sin otros agentes activos';
     const flow = isDelegationProgress ? 'progress' : (isDelegationResult ? 'result' : 'direct');
     const hasPlan = planRef != null && !!planBlock;
+    // Abrupt-stop resume with a plain "continue" nudge: no system/agent-order reinjection; send an ultra-minimal turn.
+    const continueIntent = !!params.continueIntent && isResumed && flow === 'direct';
     // Conditional reminders/degradation: in hot routine turns keep only per-turn deltas (system already carries static context).
     // Full turn on first/new turn, callbacks, active plan/tracking context, or explicit opt-out.
-    const routine = params.minimalTurn ?? (isResumed && flow === 'direct' && !hasPlan);
+    const routine = continueIntent ? true : (params.minimalTurn ?? (isResumed && flow === 'direct' && !hasPlan));
     let delegationNote = '';
     if (flow === 'progress') {
       delegationNote = `\n[PROGRESS state=PROGRESS request en curso]${callbackContext ? ` Plan/contexto: ${callbackContext}` : ''} Registra avance y espera RESULT final de esta request; no concluyas, no delegues ni toques la subcadena.${hasPlan ? ' Mantén el tracking (no avances de paso).' : ''}`;
@@ -97,6 +117,11 @@ export class PromptBuilderService {
       ? `\n[ENTREGA AL REMITENTE] Solicitante inmediato: ${sender.nickname}. Si respondes en tu turno, tu respuesta se entrega a ${sender.nickname} automáticamente como [DELEGATION RESULT] (no crea una orden nueva). Delegar a ${sender.nickname} está bloqueado: crearía una orden nueva y un eco. Si el remitente es el destinatario natural de lo que te pide (dato, respuesta, mensaje, confirmación o entrega), contéstalo directamente en tu turno. No le pidas al receptor que reporte al usuario final: su respuesta se te entrega a ti automáticamente. Solo delega si necesitas la acción de un TERCERO distinto de ${sender.nickname}.`
       : '';
     const originHint = origin?.rootUserPayload ? `\n[OBJETIVO RAÍZ (referencia)] ${String(origin.rootUserPayload).replace(/\s+/g,' ').trim().slice(0, 400)}` : '';
+    if (continueIntent) {
+      // Ultra-minimal continuation: session already has system/context; no extra agent orders.
+      const planHint = hasPlan ? planNote : '';
+      return `[PI-HIVE] ${agent.nickname}. Continúa.${planHint}\n---\n${taskPayload}`;
+    }
     if (routine) {
       // Dedupe: system prompt already carries identity/rol/equipo/protocol; send only per-turn deltas.
       return `[PI-HIVE] ${agent.nickname}.${senderLine}${originLine}${meta}${deliveryNote}${delegationNote}${planNote}${originHint}\n---\n${taskPayload}`;

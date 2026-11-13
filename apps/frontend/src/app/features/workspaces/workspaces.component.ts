@@ -6,7 +6,7 @@ import { ButtonModule } from 'primeng/button';
 import { Router } from '@angular/router';
 import { WorkspaceService, IWorkspace } from '../../core/services/workspace.service';
 import { UiFeedbackService } from '../../core/services/ui-feedback.service';
-import { AppSettingsService, AppSettingsResponse } from '../../core/services/app-settings.service';
+import { AppSettingsService } from '../../core/services/app-settings.service';
 import { AgentService } from '../../core/services/agent.service';
 import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-prompts.service';
 
@@ -21,27 +21,9 @@ import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-
         <h2>Workspaces</h2>
         <p class="sub">Cada workspace es un Hive independiente. Solo se puede abrir un workspace a la vez; para abrir otro usa otra pestaña del navegador.</p>
       </div>
-      <button pButton label="Añadir workspace" icon="pi pi-plus" (click)="openCreate()"></button>
-    </div>
-
-    <div class="settings card">
-      <div class="settings-head">
-        <div>
-          <div class="name">Configuración de Pi</div>
-          <div class="path">Directorio de agente de Pi (auth, modelos, sesiones). Por defecto usa <code>PI_CODING_AGENT_DIR</code> o <code>~/.pi/agent</code> para compartir la sesión de la CLI (p. ej. Google Antigravity).</div>
-        </div>
-      </div>
-      <div class="settings-body">
-        <label>Pi agentDir
-          <div class="row">
-            <input class="flex" [(ngModel)]="piAgentDir" [placeholder]="appSettingsDefaults.piAgentDir || '~/.pi/agent'" />
-            <button pButton label="Usar por defecto" class="p-button-outlined p-button-sm" type="button" (click)="useDefaultPiAgentDir()"></button>
-            <button pButton label="Guardar" icon="pi pi-save" class="p-button-sm" type="button" (click)="saveSettings()" [disabled]="savingSettings"></button>
-          </div>
-        </label>
-        <div class="path">Efectivo: <span class="mono">{{ appSettingsEffective.piAgentDir || '—' }}</span></div>
-        <div class="ok" *ngIf="settingsMsg">{{ settingsMsg }}</div>
-        <div class="err" *ngIf="settingsErr">{{ settingsErr }}</div>
+      <div class="head-actions">
+        <button pButton label="Configuración" icon="pi pi-cog" class="p-button-outlined" (click)="openConfig()"></button>
+        <button pButton label="Añadir workspace" icon="pi pi-plus" (click)="openCreate()"></button>
       </div>
     </div>
 
@@ -63,6 +45,69 @@ import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-
     </div>
   </div>
 
+  <!-- Configuración (Pi + system prompts base) -->
+  <p-dialog header="Configuración" [(visible)]="configOpen" [modal]="true" [style]="{width:'920px'}" (onShow)="loadSettings(); loadGlobalPrompts()">
+    <div class="wizard">
+      <div class="step"><strong>Pi (agentDir)</strong></div>
+      <div class="path">Directorio de agente de Pi (auth, modelos, sesiones). Por defecto usa <code>PI_CODING_AGENT_DIR</code> o <code>~/.pi/agent</code>.</div>
+      <label>Pi agentDir
+        <div class="row">
+          <input class="flex" [(ngModel)]="piAgentDir" [placeholder]="appSettingsDefaults.piAgentDir || '~/.pi/agent'" />
+          <button pButton label="Usar por defecto" class="p-button-outlined p-button-sm" type="button" (click)="useDefaultPiAgentDir()"></button>
+          <button pButton label="Guardar" icon="pi pi-save" class="p-button-sm" type="button" (click)="saveSettings()" [disabled]="savingSettings"></button>
+        </div>
+      </label>
+      <div class="path">Efectivo: <span class="mono">{{ appSettingsEffective.piAgentDir || '—' }}</span></div>
+      <div class="ok" *ngIf="settingsMsg">{{ settingsMsg }}</div>
+      <div class="err" *ngIf="settingsErr">{{ settingsErr }}</div>
+
+      <div class="step"><strong>System prompts base (seleccionables al abrir un workspace)</strong></div>
+      <div class="path">El prompt por defecto del sistema no es editable. Puedes añadir prompts base adicionales; al abrir un workspace elegirás cuál usar (por defecto el del sistema).</div>
+      <div class="sp-list">
+        @for (p of globalPrompts; track p.id) {
+          <div class="sp-item" [class.default]="p.is_default">
+            <div class="sp-head">
+              <input class="sp-name" [(ngModel)]="p.name" [disabled]="p.is_default" placeholder="Nombre" />
+              <span class="pill" *ngIf="p.is_default">default · inmutable</span>
+              <span class="flex"></span>
+              @if (!p.is_default) {
+                <button pButton label="Guardar" class="p-button-sm p-button-outlined" (click)="saveGlobalPrompt(p)"></button>
+                <button pButton label="Eliminar" class="p-button-sm p-button-danger p-button-outlined" (click)="deleteGlobalPrompt(p)"></button>
+              }
+            </div>
+            <textarea class="sp-content" [(ngModel)]="p.content" [disabled]="p.is_default" rows="3" [placeholder]="p.is_default ? '(gestionado por el sistema)' : 'Contenido del system prompt base'"></textarea>
+          </div>
+        }
+        @if (!globalPrompts.length) { <div class="path">Cargando…</div> }
+      </div>
+      <div class="sp-add">
+        <div class="step"><strong>Añadir system prompt base</strong></div>
+        <label>Nombre <input [(ngModel)]="newSpName" placeholder="Nombre" /></label>
+        <label>Contenido <textarea [(ngModel)]="newSpContent" rows="3" placeholder="Contenido"></textarea></label>
+        <div><button pButton label="Añadir prompt" icon="pi pi-plus" class="p-button-sm" (click)="createGlobalPrompt()" [disabled]="!newSpName.trim()"></button></div>
+      </div>
+      <div class="err" *ngIf="spErr">{{ spErr }}</div>
+    </div>
+  </p-dialog>
+
+  <!-- Selector de system prompt al abrir workspace -->
+  <p-dialog header="Abrir workspace" [(visible)]="openSelectVisible" [modal]="true" [style]="{width:'620px'}">
+    <div class="wizard" *ngIf="openTarget">
+      <div class="path">Workspace: <strong>{{ openTarget.name }}</strong></div>
+      <label>System prompt base a usar
+        <select [(ngModel)]="openSelectedPromptId">
+          @for (p of globalPrompts; track p.id) { <option [value]="p.id">{{ p.name }}{{ p.is_default ? ' (default)' : '' }}</option> }
+        </select>
+      </label>
+      <div class="path">Se aplicará como prompt base del sistema para este workspace (por defecto el del sistema). La gobernanza/delegación se inyecta aparte.</div>
+      <div class="actions">
+        <button pButton label="Cancelar" class="p-button-text" (click)="openSelectVisible=false"></button>
+        <button pButton label="Abrir" icon="pi pi-check" (click)="confirmOpenWorkspace()" [disabled]="!openSelectedPromptId"></button>
+      </div>
+    </div>
+  </p-dialog>
+
+  <!-- Crear / editar workspace -->
   <p-dialog [header]="editWs ? 'Editar workspace' : 'Configurar nuevo workspace'" [(visible)]="wizardOpen" [modal]="true" [style]="{width:'860px'}" (onHide)="resetWizard()">
     <div class="wizard">
       <div class="step"><strong>1) Workspace</strong></div>
@@ -78,8 +123,9 @@ import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-
       } @else { <div class="mono">{{ editWs.path }}</div> }
       <label>Nombre <input [(ngModel)]="wsName" /></label>
 
-      <div class="step"><strong>2) System prompt</strong></div>
-      <select [(ngModel)]="selectedPromptId">@for (p of prompts; track p.id) { <option [value]="p.id">{{ p.name }}{{ p.is_default ? ' (default, immutable)' : '' }}</option> }</select>
+      <div class="step"><strong>2) Prompt del workspace</strong></div>
+      <div class="path">Instrucciones adicionales propias de este workspace. Se añaden al contexto del sistema (no reemplazan la gobernanza/delegación general). El system prompt base se elige al abrir el workspace.</div>
+      <textarea [(ngModel)]="wsPrompt" rows="5" placeholder="Escribe aquí el prompt/instrucciones para este workspace (opcional)"></textarea>
 
       @if (!editWs) {
         <div class="step"><strong>3) Chief (requerido)</strong></div>
@@ -104,7 +150,7 @@ import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-
           </div>
         </label>
         <label>Instrucción adicional <textarea [(ngModel)]="chiefInstruction" rows="2"></textarea></label>
-        <label class="row"><input type="checkbox" [(ngModel)]="useCustomChiefPrompt" /> Usar chief prompt custom</label>
+        <label class="row"><input type="checkbox" [(ngModel)]="useCustomChiefPrompt" /> Usar chief prompt custom (reemplaza la plantilla de coordinación del chief)</label>
         <textarea *ngIf="useCustomChiefPrompt" [(ngModel)]="customChiefPrompt" rows="3" placeholder="Custom chief prompt (soporta TEAM_ROSTER)"></textarea>
       }
 
@@ -122,13 +168,14 @@ import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-
   styles: [`
     .page{padding:24px;max-width:1100px;margin:0 auto;color:var(--text-primary)}
     .page-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:18px}
+    .head-actions{display:flex;gap:8px;align-items:center}
     h2{margin:0 0 4px}.sub{margin:0;color:var(--text-secondary);font-size:12px}
     .list{display:flex;flex-direction:column;gap:10px}
     .card{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px;border:1px solid var(--border-color);border-radius:var(--radius-md);background:var(--bg-secondary)}
     .card.active{border-color:var(--accent-blue)}
     .name{font-weight:600;display:flex;align-items:center;gap:8px}.path,.mono{font-size:11px;color:var(--text-muted);font-family:var(--font-mono)}
     .pill{font-size:10px;padding:2px 6px;border-radius:999px;background:rgba(59,130,246,.2);color:var(--accent-blue)}
-    .actions{display:flex;gap:8px}.empty{color:var(--text-muted);padding:24px;text-align:center;border:1px dashed var(--border-color);border-radius:var(--radius-md)}
+    .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}.empty{color:var(--text-muted);padding:24px;text-align:center;border:1px dashed var(--border-color);border-radius:var(--radius-md)}
     .wizard{display:flex;flex-direction:column;gap:10px}.step{margin-top:6px;font-size:13px}
     label{display:flex;flex-direction:column;gap:4px;font-size:12px} label.row,.row{flex-direction:row;align-items:center;gap:8px;display:flex}
     input,textarea,select{padding:6px 8px;background:var(--bg-secondary);border:1px solid var(--border-color);color:var(--text-primary);border-radius:var(--radius-sm)}
@@ -136,25 +183,38 @@ import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-
     .browse-header{display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);font-family:var(--font-mono)}
     .dirs{max-height:160px;overflow:auto;display:grid;grid-template-columns:repeat(2,1fr);gap:4px;margin:6px 0}
     .dir{padding:4px 6px;border-radius:4px;cursor:pointer;font-size:12px}.dir:hover{background:var(--bg-tertiary)}
-    .err{color:var(--accent-red);font-size:12px}.color-row{display:flex;align-items:center;gap:8px}
+    .err{color:var(--accent-red);font-size:12px}.ok{color:var(--accent-green,#22c55e);font-size:12px}
+    .color-row{display:flex;align-items:center;gap:8px}
     .color-btn{width:36px;height:28px;border-radius:6px;border:1px solid var(--border-color);cursor:pointer;padding:0}
-    .settings{margin-bottom:18px;display:flex;flex-direction:column;gap:10px;align-items:stretch}
-    .settings-head{display:flex;justify-content:space-between;align-items:flex-start}
-    .settings-body{display:flex;flex-direction:column;gap:8px}
-    .ok{color:var(--accent-green,#22c55e);font-size:12px}
-    code{font-family:var(--font-mono);font-size:11px;color:var(--text-secondary)}
     .color-hidden{position:absolute;opacity:0;width:0;height:0;pointer-events:none}
+    code{font-family:var(--font-mono);font-size:11px;color:var(--text-secondary)}
+    .sp-list{display:flex;flex-direction:column;gap:10px}
+    .sp-item{border:1px solid var(--border-color);border-radius:var(--radius-sm);padding:10px;display:flex;flex-direction:column;gap:6px;background:var(--bg-secondary)}
+    .sp-item.default{opacity:.95}
+    .sp-head{display:flex;align-items:center;gap:8px}
+    .sp-name{font-weight:600;max-width:320px}
+    .sp-content{width:100%;font-family:var(--font-mono);font-size:12px}
+    .sp-add{border-top:1px dashed var(--border-color);padding-top:10px;display:flex;flex-direction:column;gap:8px}
   `]
 })
 export class WorkspacesComponent implements OnInit {
   workspaces: IWorkspace[] = [];
   wizardOpen=false; editWs: IWorkspace|null=null; saving=false; error='';
   newPath=''; browseVisible=false; browseCurrent=''; browseParent:string|null=null; browseDirs:any[]=[];
-  wsName=''; prompts: ISystemPrompt[]=[]; selectedPromptId='default-system-prompt';
+  wsName=''; wsPrompt='';
   chiefNickname=''; modelProviders: Array<{provider:string;models:string[]}>=[]; selectedProvider=''; selectedModelId=''; chiefModel=''; chiefColor=this.randColor(); chiefInstruction=''; useCustomChiefPrompt=false; customChiefPrompt=''; hitlEnabled=false;
+  // config modal
+  configOpen=false; piAgentDir=''; appSettingsDefaults: {piAgentDir?: string} = {}; appSettingsEffective: {piAgentDir?: string} = {}; savingSettings=false; settingsMsg=''; settingsErr='';
+  // global/base system prompts
+  globalPrompts: ISystemPrompt[]=[]; spErr=''; newSpName=''; newSpContent='';
+  // open-workspace prompt selector
+  openSelectVisible=false; openTarget: IWorkspace|null=null; openSelectedPromptId='default-system-prompt';
+
   constructor(private ws: WorkspaceService, private agents: AgentService, private sp: SystemPromptsService, private router: Router, private feedback: UiFeedbackService, private appSettings: AppSettingsService) {}
-  piAgentDir=''; appSettingsDefaults: {piAgentDir?: string} = {}; appSettingsEffective: {piAgentDir?: string} = {}; savingSettings=false; settingsMsg=''; settingsErr='';
-  ngOnInit(){ this.load(); this.loadSettings(); this.agents.getModels().subscribe(m=>{this.modelProviders=(m as any)||[]; this.onProviderChange();}); }
+
+  ngOnInit(){ this.load(); this.agents.getModels().subscribe(m=>{this.modelProviders=(m as any)||[]; this.onProviderChange();}); }
+
+  openConfig(){ this.configOpen=true; }
   loadSettings(){ this.appSettings.get().subscribe({ next: (r: any) => { this.appSettingsDefaults = r.defaults || {}; this.appSettingsEffective = r.effective || {}; this.piAgentDir = (r.values && r.values['pi.agentDir']) || ''; }, error: () => {} }); }
   useDefaultPiAgentDir(){ this.piAgentDir = ''; }
   saveSettings(){
@@ -166,12 +226,47 @@ export class WorkspacesComponent implements OnInit {
     });
   }
 
+  loadGlobalPrompts(){
+    this.spErr='';
+    this.sp.listGlobal().subscribe({ next: (l)=>{ this.globalPrompts = l || []; if(!this.openSelectedPromptId) this.openSelectedPromptId='default-system-prompt'; }, error: ()=>{ this.spErr='No se pudieron cargar los system prompts.'; } });
+  }
+  createGlobalPrompt(){
+    const name=(this.newSpName||'').trim(); if(!name) return;
+    this.sp.createGlobal(name, this.newSpContent||'').subscribe({ next: ()=>{ this.newSpName=''; this.newSpContent=''; this.loadGlobalPrompts(); this.feedback.success('System prompt añadido.'); }, error: (e)=>{ this.spErr=e?.error?.error||'No se pudo crear.'; } });
+  }
+  saveGlobalPrompt(p: ISystemPrompt){
+    if(p.is_default) return;
+    this.sp.updateGlobal(p.id, { name: p.name, content: p.content }).subscribe({ next: ()=> this.feedback.success('System prompt guardado.'), error: (e)=> this.feedback.error(e?.error?.error||'No se pudo guardar.') });
+  }
+  async deleteGlobalPrompt(p: ISystemPrompt){
+    if(p.is_default) return;
+    const ok = await this.feedback.confirm({ title: 'Eliminar system prompt', message: `¿Eliminar "${p.name}"?`, confirmLabel: 'Eliminar', danger: true }); if(!ok) return;
+    this.sp.deleteGlobal(p.id).subscribe({ next: ()=>{ this.loadGlobalPrompts(); this.feedback.success('System prompt eliminado.'); }, error: (e)=> this.feedback.error(e?.error?.error||'No se pudo eliminar.') });
+  }
+
   load(){ this.ws.getAll().subscribe(l=>this.workspaces=l); }
-  openWorkspace(w:IWorkspace){ this.ws.activate(w.id).subscribe(()=>{ this.load(); this.router.navigateByUrl(`/workspaces/${w.id}/swarm-monitor`); }); }
+  openWorkspace(w:IWorkspace){
+    this.openTarget = w;
+    this.openSelectedPromptId = w.active_system_prompt_id || 'default-system-prompt';
+    this.openSelectVisible = true;
+    if(!this.globalPrompts.length) this.loadGlobalPrompts();
+  }
+  confirmOpenWorkspace(){
+    if(!this.openTarget) return;
+    const w = this.openTarget;
+    const promptId = this.openSelectedPromptId || 'default-system-prompt';
+    this.ws.update(w.id, { active_system_prompt_id: promptId }).subscribe({
+      next: () => this.ws.activate(w.id).subscribe(()=>{
+        this.openSelectVisible=false; this.load(); this.router.navigateByUrl(`/workspaces/${w.id}/swarm-monitor`);
+      }),
+      error: ()=> this.feedback.error('No se pudo actualizar el system prompt del workspace.')
+    });
+  }
+
   async deleteWorkspace(w:IWorkspace){ const ok = await this.feedback.confirm({ title: 'Eliminar workspace', message: `Eliminar workspace "${w.name}" (${w.path})?\nEsto eliminará sus agentes y tareas.`, confirmLabel: 'Eliminar', danger: true }); if(!ok) return; this.ws.delete(w.id).subscribe({ next: ()=>{ this.feedback.success(`Workspace "${w.name}" eliminado.`); this.load(); }, error: ()=> this.feedback.error('No se pudo eliminar el workspace.') }); }
-  openCreate(){ this.editWs=null; this.resetWizard(); this.wizardOpen=true; this.chiefNickname='Chief-'+Math.random().toString(36).slice(2,5); this.chiefColor=this.randColor(); this.prompts=[{id:'default-system-prompt',workspace_id:null,name:'Default Hive System Prompt',content:'',is_default:true}]; }
-  openEdit(w:IWorkspace){ this.editWs=w; this.wizardOpen=true; this.wsName=w.name; this.hitlEnabled=!!w.hitl_enabled; this.selectedPromptId=w.active_system_prompt_id||'default-system-prompt'; }
-  resetWizard(){ this.error=''; this.saving=false; this.newPath=''; this.browseVisible=false; this.wsName=''; this.chiefNickname=''; this.selectedProvider=''; this.selectedModelId=''; this.chiefModel=''; this.chiefInstruction=''; this.useCustomChiefPrompt=false; this.customChiefPrompt=''; this.hitlEnabled=false; }
+  openCreate(){ this.editWs=null; this.resetWizard(); this.wizardOpen=true; this.chiefNickname='Chief-'+Math.random().toString(36).slice(2,5); this.chiefColor=this.randColor(); }
+  openEdit(w:IWorkspace){ this.editWs=w; this.resetWizard(); this.wizardOpen=true; this.wsName=w.name; this.hitlEnabled=!!w.hitl_enabled; this.wsPrompt = (w as any).workspace_prompt || ''; }
+  resetWizard(){ this.error=''; this.saving=false; this.newPath=''; this.browseVisible=false; this.wsName=''; this.wsPrompt=''; this.chiefNickname=''; this.selectedProvider=''; this.selectedModelId=''; this.chiefModel=''; this.chiefInstruction=''; this.useCustomChiefPrompt=false; this.customChiefPrompt=''; this.hitlEnabled=false; }
   browse(p:string){ this.browseVisible=true; this.ws.browseDirs(p||undefined).subscribe(r=>{ this.browseCurrent=r.current; this.browseParent=r.parent; this.browseDirs=r.dirs||[]; if(r.error) this.error=r.error; }); }
   useFolder(){ this.newPath=this.browseCurrent; this.browseVisible=false; this.wsName=this.newPath.split('/').filter(Boolean).pop()||'workspace'; }
   currentModels(): string[] { const p=this.modelProviders.find(x=>x.provider===this.selectedProvider); return p?p.models:[]; }
@@ -181,14 +276,14 @@ export class WorkspacesComponent implements OnInit {
     this.error='';
     if(this.editWs){
       this.saving=true;
-      this.ws.update(this.editWs.id,{name:this.wsName||this.editWs.name, hitl_enabled:this.hitlEnabled, active_system_prompt_id:this.selectedPromptId||null}).subscribe({next:()=>{this.wizardOpen=false; this.saving=false; this.load(); this.ws.refreshActive();}, error:(e)=>{this.error=e?.error?.message||'Error'; this.saving=false;}});
+      this.ws.update(this.editWs.id,{name:this.wsName||this.editWs.name, hitl_enabled:this.hitlEnabled, workspace_prompt: (this.wsPrompt||'').trim() || null} as any).subscribe({next:()=>{this.wizardOpen=false; this.saving=false; this.load(); this.ws.refreshActive();}, error:(e)=>{this.error=e?.error?.message||'Error'; this.saving=false;}});
       return;
     }
     if(!this.newPath.trim()) { this.error='La carpeta es obligatoria'; return; }
     if(!this.selectedProvider||!this.selectedModelId){ this.error='Proveedor y modelo son obligatorios'; return; }
     if(!this.chiefColor) this.chiefColor=this.randColor();
     this.saving=true; this.chiefModel=`${this.selectedProvider}/${this.selectedModelId}`;
-    this.ws.create(this.wsName||'workspace', this.newPath.trim(), this.hitlEnabled).subscribe({
+    this.ws.create(this.wsName||'workspace', this.newPath.trim(), this.hitlEnabled, (this.wsPrompt||'').trim() || null).subscribe({
       next:(ws)=>{
         const finish=()=>{ const chief:any={ id:`chief-${Date.now().toString(36)}`, name:this.chiefNickname||'Chief', nickname:this.chiefNickname||'Chief', role:'CHIEF', status:'IDLE', workspace_id:ws.id, color:this.chiefColor, additional_instruction:this.chiefInstruction||null, inject_context:true, task_state:{model:this.chiefModel} };
           this.agents.create(chief).subscribe({ next:()=>{ this.ws.refreshActive(); this.wizardOpen=false; this.saving=false; this.load(); setTimeout(()=>this.router.navigateByUrl(`/workspaces/${ws.id}/swarm-monitor`), 50); }, error:(e)=>{this.error=e?.error?.message||'Error creando chief (¿color duplicado?)'; this.saving=false;} });

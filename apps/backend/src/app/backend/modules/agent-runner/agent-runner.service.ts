@@ -683,6 +683,10 @@ export class AgentRunnerService implements OnModuleInit {
       const hasInjectedContext = !!String(systemPrompt || '').trim();
       // Skip reapplying/persisting an unchanged system prompt on resumed sessions (Pi session already has context).
       const systemChanged = this.systemPromptHashByAgent.get(agent.id) !== systemPromptHash;
+      // Abrupt-stop resume with a plain "continue/continúa/..." nudge: ultra-minimal turn, no extra agent orders.
+      const continueIntent = isResumed && !isDelegationCallback && !!this.systemPromptInjected.has(agent.id) && !systemChanged
+        && typeof (this.promptBuilder as any).isContinuationIntent === 'function'
+        && (this.promptBuilder as any).isContinuationIntent(task.payload);
       const promptText = await this.promptBuilder.build({
         agent,
         taskPayload: task.payload,
@@ -700,7 +704,8 @@ export class AgentRunnerService implements OnModuleInit {
         taskId: Number(task.id),
         requestId: originCtx?.requestId ?? null,
         // degrade strong reminders in hot routine turns (resumed, direct, no plan/callback change, unchanged system)
-        minimalTurn: isResumed && !isDelegationCallback && !activePlanBlock && !!this.systemPromptInjected.has(agent.id) && !systemChanged,
+        minimalTurn: continueIntent || (isResumed && !isDelegationCallback && !activePlanBlock && !!this.systemPromptInjected.has(agent.id) && !systemChanged),
+        continueIntent,
       });
       this.trace.record({ runId, agentId: agent.id, eventType: 'session', taskId: task.id, workspaceId, eventData: { resumedSession: isResumed, sessionId: agent.current_session_id || null, cwd, depth: (task as any).depth ?? 0, depth_path: (task as any).depth_path ?? null } }).catch(() => {});
       this.trace.record({ runId, agentId: agent.id, eventType: 'model', taskId: task.id, workspaceId, eventData: { provider: resolved.provider, modelId: resolved.modelId, raw: resolved.raw } }).catch(() => {});
