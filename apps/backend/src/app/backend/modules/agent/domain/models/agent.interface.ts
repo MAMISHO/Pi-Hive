@@ -15,4 +15,5 @@ export interface IAgent {
   inject_context: boolean;
   thinkingLevel?: 'off'|'minimal'|'low'|'medium'|'high'|'xhigh'|'max';
   archived_at?: Date | string | null;
+  usage_reset_at?: Date | string | null;
 }

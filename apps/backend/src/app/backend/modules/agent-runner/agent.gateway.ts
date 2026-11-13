@@ -24,6 +24,7 @@ export class AgentGateway implements OnGatewayInit {
     fwd('agent:run:usage');
     fwd('agent:transcript:cleared');
     fwd('tasks:cleared');
+    fwd('agent:usage:reset');
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const { taskEventEmitter } = require('../task-queue/infra/persistence/sequalize/entities/task-queue.schema.js');

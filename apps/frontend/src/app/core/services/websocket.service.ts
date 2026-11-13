@@ -19,6 +19,7 @@ export class WebsocketService {
   private queueUpdatedSubject = new Subject<QueueUpdatedEvent>();
   private runEventSubject = new Subject<RunEvent>();
   private usageSubject = new Subject<UsageEvent>();
+  private usageResetSubject = new Subject<{ agentId: string; workspaceId?: string | null; usage_reset_at?: string | null }>();
   private rehydrateSubject = new Subject<void>();
 
   transcriptCleared$ = this.transcriptClearedSubject.asObservable();
@@ -28,6 +29,7 @@ export class WebsocketService {
   queueUpdated$ = this.queueUpdatedSubject.asObservable();
   runEvent$ = this.runEventSubject.asObservable();
   usage$ = this.usageSubject.asObservable();
+  usageReset$ = this.usageResetSubject.asObservable();
   rehydrate$ = this.rehydrateSubject.asObservable();
   streamText$: Observable<StreamTextEvent> = this.streamTextSubject.asObservable();
   streamTool$: Observable<StreamToolEvent> = this.streamToolSubject.asObservable();
@@ -54,6 +56,7 @@ export class WebsocketService {
     this.socket.on('agent:run:error', (data: RunEvent) => this.runEventSubject.next({ ...data, type: 'error' }));
     this.socket.on('agent:run:warning', (data: RunEvent) => this.runEventSubject.next({ ...data, type: 'warning' }));
     this.socket.on('agent:run:usage', (data: UsageEvent) => this.usageSubject.next(data));
+    this.socket.on('agent:usage:reset', (data: any) => this.usageResetSubject.next(data));
     this.socket.on('agent:transcript:cleared', (data: any) => this.transcriptClearedSubject.next(data));
     this.socket.on('tasks:cleared', (data: any) => this.tasksClearedSubject.next(data));
     this.socket.on('task:updated', (data: any) => this.taskUpdatedSubject.next(data));

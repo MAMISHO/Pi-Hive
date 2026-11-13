@@ -72,6 +72,10 @@ export const databaseProviders = [
             await sequelize.query("ALTER TABLE agents ADD COLUMN thinking_level VARCHAR(16) DEFAULT 'low';");
             console.log('[DB] added agents.thinking_level');
           }
+          if (!anames.has('usage_reset_at')) {
+            await sequelize.query("ALTER TABLE agents ADD COLUMN usage_reset_at DATETIME;");
+            console.log('[DB] added agents.usage_reset_at');
+          }
         } catch (e) { console.warn('[DB] agents migrate:', (e as any)?.message || e); }
         console.log('Database synchronized (alter).');
 

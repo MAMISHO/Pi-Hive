@@ -48,4 +48,7 @@ export class AgentEntity extends Model<IAgent> {
 
   @Column({ type: DataType.DATE, allowNull: true })
   archived_at: Date | null;
+
+  @Column({ type: DataType.DATE, allowNull: true })
+  usage_reset_at: Date | null;
 }

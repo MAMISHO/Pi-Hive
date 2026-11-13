@@ -99,4 +99,61 @@ export class RunTraceService {
     } as any);
     return { byEventType: rows.map((r: any) => ({ event_type: r.get('event_type'), count: parseInt(String(r.get('count')), 10) })) };
   }
+
+  private emptyUsageTotals() {
+    return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, costFromProvider: false };
+  }
+  private addUsageTotals(dst: any, src: any) {
+    if (!src) return;
+    dst.input += Number(src.input || 0);
+    dst.output += Number(src.output || 0);
+    dst.cacheRead += Number(src.cacheRead || 0);
+    dst.cacheWrite += Number(src.cacheWrite || 0);
+    dst.totalTokens += Number(src.totalTokens || 0);
+    const c = src.cost || {};
+    dst.cost.input += Number(c.input || 0);
+    dst.cost.output += Number(c.output || 0);
+    dst.cost.cacheRead += Number(c.cacheRead || 0);
+    dst.cost.cacheWrite += Number(c.cacheWrite || 0);
+    dst.cost.total += Number(c.total || 0);
+    if (src.costFromProvider || c.totalFromProvider) dst.costFromProvider = true;
+  }
+
+  async getWorkspaceUsage(workspaceId: string): Promise<any> {
+    const rows = await AgentRunLogEntity.findAll({
+      where: { workspace_id: workspaceId, event_type: 'run_usage' } as any,
+      order: [['created_at', 'ASC'], ['id', 'ASC']],
+    } as any);
+    const overall = this.emptyUsageTotals();
+    const byAgent: Record<string, any> = {};
+    const byDay: Record<string, any> = {};
+    const runs: any[] = [];
+    for (const row of rows.map((r: any) => r.toJSON())) {
+      let data: any = {};
+      try { data = row.event_data ? JSON.parse(row.event_data) : {}; } catch { data = {}; }
+      const totals = data.totals || {};
+      const agentId = String(row.agent_id || 'unknown');
+      const createdAt = row.created_at ? new Date(row.created_at).toISOString() : null;
+      const day = createdAt ? createdAt.slice(0, 10) : 'unknown';
+      this.addUsageTotals(overall, totals);
+      if (!byAgent[agentId]) byAgent[agentId] = { agentId, totals: this.emptyUsageTotals(), runs: 0, turns: 0, lastAt: null, providers: {} as Record<string, boolean> };
+      this.addUsageTotals(byAgent[agentId].totals, totals);
+      byAgent[agentId].runs += 1;
+      byAgent[agentId].turns += Number(data.turns || 0);
+      byAgent[agentId].lastAt = createdAt || byAgent[agentId].lastAt;
+      if (data.provider) byAgent[agentId].providers[data.provider] = true;
+      if (!byDay[day]) byDay[day] = { day, totals: this.emptyUsageTotals(), runs: 0 };
+      this.addUsageTotals(byDay[day].totals, totals);
+      byDay[day].runs += 1;
+      runs.push({
+        runId: row.run_id, agentId, workspaceId: row.workspace_id, taskId: row.task_id,
+        provider: data.provider, modelId: data.modelId, model: data.model,
+        turns: Number(data.turns || 0), outcome: data.outcome || null, stopReason: data.stopReason || null,
+        totals, createdAt,
+      });
+    }
+    const agents = Object.values(byAgent).map((a: any) => ({ ...a, providers: Object.keys(a.providers || {}) })).sort((a: any, b: any) => Number(b.totals?.totalTokens || 0) - Number(a.totals?.totalTokens || 0));
+    const timeline = Object.values(byDay).sort((a: any, b: any) => String(a.day).localeCompare(String(b.day)));
+    return { workspaceId, overall, agents, timeline, runs: runs.slice(-500) };
+  }
 }

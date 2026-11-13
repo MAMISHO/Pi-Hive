@@ -204,6 +204,17 @@ export class AgentController {
   @Put(':id/session/compact') async compactSession(@Param('id') id: string) { agentEventEmitter.emit('agent:session:compact', id); return { ok: true }; }
   @Put(':id/session/resume') async resumeSession(@Param('id') id: string) { agentEventEmitter.emit('agent:session:resume', id); return { ok: true }; }
 
+  @Put(':id/usage/reset')
+  async resetUsage(@Param('id') id: string) {
+    const agent = await this.agentRepository.get(id);
+    if (!agent) return { ok: false, reason: 'not_found' };
+    (agent as any).usage_reset_at = new Date();
+    await this.agentRepository.update(agent as any);
+    const saved = await this.agentRepository.get(id);
+    agentEventEmitter.emit('agent:usage:reset', { agentId: id, workspaceId: (saved as any)?.workspace_id || (agent as any).workspace_id, usage_reset_at: (saved as any)?.usage_reset_at || (agent as any).usage_reset_at });
+    return { ok: true, usage_reset_at: (saved as any)?.usage_reset_at ?? (agent as any).usage_reset_at };
+  }
+
   @Delete(':id')
   async remove(@Param('id') id: string) {
     const agent = await this.agentRepository.get(id);

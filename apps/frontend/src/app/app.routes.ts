@@ -9,11 +9,13 @@ export const routes: Routes = [
     { path: 'swarm-monitor', loadComponent: () => import('./features/swarm-monitor/swarm-monitor.component').then(m => m.SwarmMonitorComponent) },
     { path: 'memory-timeline', loadComponent: () => import('./features/memory-timeline/memory-timeline.component').then(m => m.MemoryTimelineComponent) },
     { path: 'human-in-the-loop', loadComponent: () => import('./features/human-in-the-loop/human-in-the-loop.component').then(m => m.HumanInTheLoopComponent) },
+    { path: 'consumption', loadComponent: () => import('./features/consumption/consumption.component').then(m => m.ConsumptionComponent) },
   ]},
   // Legacy routes (redirected in layout/app to active workspace when available)
   { path: '', component: HiveLayoutComponent, children: [
     { path: 'swarm-monitor', loadComponent: () => import('./features/swarm-monitor/swarm-monitor.component').then(m => m.SwarmMonitorComponent) },
     { path: 'memory-timeline', loadComponent: () => import('./features/memory-timeline/memory-timeline.component').then(m => m.MemoryTimelineComponent) },
     { path: 'human-in-the-loop', loadComponent: () => import('./features/human-in-the-loop/human-in-the-loop.component').then(m => m.HumanInTheLoopComponent) },
+    { path: 'consumption', loadComponent: () => import('./features/consumption/consumption.component').then(m => m.ConsumptionComponent) },
   ]},
 ];

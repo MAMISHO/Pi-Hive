@@ -29,4 +29,9 @@ export class RunTraceController {
   ) {
     return this.trace.getStats(workspaceId, agentId);
   }
+
+  @Get('usage/workspace/:workspaceId')
+  async workspaceUsage(@Param('workspaceId') workspaceId: string) {
+    return this.trace.getWorkspaceUsage(workspaceId);
+  }
 }

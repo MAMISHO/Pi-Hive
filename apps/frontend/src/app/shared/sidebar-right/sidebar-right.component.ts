@@ -89,7 +89,7 @@ interface Edge { x1:number; y1:number; x2:number; y2:number; color:string; kind:
       } @else {
         <div class="usage-pane">
           <div class="usage-summary">
-            <div class="u-card primary"><div class="u-label">Tokens totales</div><div class="u-value">{{ fmtNum(usageTotals.totalTokens) }}</div><div class="u-sub">workspace · sesión en vivo</div></div>
+            <div class="u-card primary"><div class="u-label">Tokens totales</div><div class="u-value">{{ fmtNum(usageTotals.totalTokens) }}</div><div class="u-sub">workspace · sesión actual (persistida)</div></div>
             <div class="u-grid">
               <div class="u-card"><div class="u-label">Entrada</div><div class="u-value sm">{{ fmtNum(usageTotals.input) }}</div></div>
               <div class="u-card"><div class="u-label">Salida</div><div class="u-value sm">{{ fmtNum(usageTotals.output) }}</div></div>
@@ -104,7 +104,7 @@ interface Edge { x1:number; y1:number; x2:number; y2:number; color:string; kind:
               <div class="u-row"><span>Cache write</span><span>{{ fmtCost(usageTotals.cost.cacheWrite) }}</span></div>
             </div>
           </div>
-          <div class="runs-header"><span>Ejecuciones (tiempo real)</span><span class="live-dot" [class.on]="usageRuns.length"></span></div>
+          <div class="runs-header"><span>Ejecuciones (sesión)</span><span class="live-dot" [class.on]="usageRuns.length"></span></div>
           <div class="runs-list">
             @for (r of usageRuns; track r.runId) {
               <div class="run-card">

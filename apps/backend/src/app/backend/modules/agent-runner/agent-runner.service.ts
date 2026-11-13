@@ -5,7 +5,7 @@ import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import * as fs from 'fs';
 import * as path from 'path';
 import { EventEmitter } from 'events';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 
 import { IAgent } from '../agent/domain/models/agent.interface.js';
 import { IAgentRepository, IAgentRepositoryToken } from '../agent/domain/repositories/agent-repository.interface.js';
@@ -35,6 +35,7 @@ export class AgentRunnerService implements OnModuleInit {
   private pendingByAgent = new Map<string, ITaskQueue[]>();
   private currentTaskByAgent = new Map<string, number>();
   private systemPromptInjected = new Set<string>();
+  private systemPromptHashByAgent = new Map<string, string>(); // avoid reapplying unchanged system prompt on resumed sessions
   private cachedRuntime: any = null;
   private cachedRuntimeAgentDir: string | null = null;
 
@@ -677,6 +678,11 @@ export class AgentRunnerService implements OnModuleInit {
       const activePlanBlock = activePlan
         ? (activePlan.schema === 'v2' ? planStore.formatForAgent(activePlan, agent.nickname, Number((task as any).depth ?? 0)) : planStore.formatForPrompt(activePlan))
         : null;
+      const systemPrompt = await this.promptBuilder.buildSystem({ agent, team: availableAgents });
+      const systemPromptHash = createHash('sha1').update(String(systemPrompt || '')).digest('hex');
+      const hasInjectedContext = !!String(systemPrompt || '').trim();
+      // Skip reapplying/persisting an unchanged system prompt on resumed sessions (Pi session already has context).
+      const systemChanged = this.systemPromptHashByAgent.get(agent.id) !== systemPromptHash;
       const promptText = await this.promptBuilder.build({
         agent,
         taskPayload: task.payload,
@@ -693,22 +699,21 @@ export class AgentRunnerService implements OnModuleInit {
         origin: originCtx?.origin ?? null,
         taskId: Number(task.id),
         requestId: originCtx?.requestId ?? null,
+        // degrade strong reminders in hot routine turns (resumed, direct, no plan/callback change, unchanged system)
+        minimalTurn: isResumed && !isDelegationCallback && !activePlanBlock && !!this.systemPromptInjected.has(agent.id) && !systemChanged,
       });
-      const systemPrompt = await this.promptBuilder.buildSystem({ agent, team: availableAgents });
-      this.trace.turnInput(runId, agent.id, workspaceId, task.id, 'turn', promptText.length).catch(() => {});
       this.trace.record({ runId, agentId: agent.id, eventType: 'session', taskId: task.id, workspaceId, eventData: { resumedSession: isResumed, sessionId: agent.current_session_id || null, cwd, depth: (task as any).depth ?? 0, depth_path: (task as any).depth_path ?? null } }).catch(() => {});
       this.trace.record({ runId, agentId: agent.id, eventType: 'model', taskId: task.id, workspaceId, eventData: { provider: resolved.provider, modelId: resolved.modelId, raw: resolved.raw } }).catch(() => {});
       if (isDelegationCallback) this.trace.record({ runId, agentId: agent.id, eventType: 'callback_received', taskId: task.id, workspaceId, eventData: { parent_task_id: task.parent_task_id, depth: (task as any).depth ?? 0, flow: (task as any).task_flow, final: (task as any).callback_final ?? null } }).catch(() => {});
-      console.log(`[AgentRunner] system prompt resolved for ${agent.nickname} (resumed=${isResumed}, callback=${(task as any).task_flow}, depth=${(task as any).depth ?? 0})`);
+      console.log(`[AgentRunner] system prompt resolved for ${agent.nickname} (resumed=${isResumed}, callback=${(task as any).task_flow}, depth=${(task as any).depth ?? 0}, sysChanged=${systemChanged})`);
       this.trace.modelSet(runId, agent.id, workspaceId, task.id, resolved.provider, resolved.modelId).catch(() => {});
       agentEventEmitter.emit('agent:run:model', { runId, agentId: agent.id, taskId: task.id, state: 'ready', provider: resolved.provider, modelId: resolved.modelId, emittedAt: Date.now() });
       this.trace.start(runId, agent.id, workspaceId, task.id).catch(() => {});
       if (isDelegationCallback) this.trace.delegationResult(runId, agent.id, workspaceId, task.id).catch(() => {});
       this.trace[isResumed ? 'sessionResumed' : 'sessionCreated'](runId, agent.id, workspaceId, String((sessionManager as any)?.getSessionFile?.() || '')).catch(() => {});
-      this.trace.systemPromptApplied(runId, agent.id, workspaceId, task.id, isResumed).catch(() => {});
       this.trace.turnInput(runId, agent.id, workspaceId, task.id, 'turn', promptText.length).catch(() => {});
 
-      const hasInjectedContext = !!String(systemPrompt || '').trim();
+      const skipSystemReapply = isResumed && !!this.systemPromptInjected.has(agent.id) && !systemChanged;
       if (isResumed) {
         this.systemPromptInjected.add(agent.id);
       } else if (!this.systemPromptInjected.has(agent.id)) {
@@ -725,6 +730,8 @@ export class AgentRunnerService implements OnModuleInit {
         }
         this.systemPromptInjected.add(agent.id);
       }
+      if (systemChanged) this.systemPromptHashByAgent.set(agent.id, systemPromptHash);
+      this.trace.systemPromptApplied(runId, agent.id, workspaceId, task.id, isResumed).catch(() => {});
       let resourceLoader: any = undefined;
       let agentDir = '';
       try { agentDir = await this.appSettings.resolvePiAgentDir(); } catch { agentDir = path.join(process.cwd(), 'data', 'pi-agent'); }
@@ -738,7 +745,7 @@ export class AgentRunnerService implements OnModuleInit {
         agentEventEmitter.emit('agent:run:warning', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'model_fallback', message: modelFallbackMessage, emittedAt: Date.now() });
         agentEventEmitter.emit('agent:run:model', { runId, agentId: agent.id, taskId: task.id, state: 'fallback', provider: resolved.provider, modelId: resolved.modelId, message: modelFallbackMessage, emittedAt: Date.now() });
       }
-      this.applySystemPrompt(session, systemPrompt);
+      if (!skipSystemReapply) this.applySystemPrompt(session, systemPrompt);
       try {
         const desiredEffort = String((agent as any).thinkingLevel || (agent as any)?.task_state?.thinkingLevel || 'low');
         if (desiredEffort && desiredEffort !== 'off' && typeof (session as any).setThinkingLevel === 'function') {
@@ -881,6 +888,25 @@ export class AgentRunnerService implements OnModuleInit {
       this.activeSessions.delete(agent.id);
       unsubscribe();
 
+      // Observabilidad: persist per-run usage/totals for token audits (provider metrics may be partial per turn).
+      const recordRunUsage = (outcome: string) => {
+        this.trace.record({
+          runId, agentId: agent.id, eventType: 'run_usage', taskId: task.id, workspaceId,
+          eventData: {
+            outcome,
+            provider: resolved.provider,
+            modelId: resolved.modelId,
+            model: resolved.raw,
+            turns: usageTurns,
+            totals: JSON.parse(JSON.stringify(runUsageTotals)),
+            nudged: retryNudged,
+            toolCallsTotal,
+            delegated: delegatedThisRun,
+            stopReason: lastStopReason,
+          },
+        }).catch(() => {});
+      };
+
       await finalizeOnce(async () => {
         const durationMs = Date.now() - startedAt;
         if (stopped) {
@@ -893,6 +919,7 @@ export class AgentRunnerService implements OnModuleInit {
             await this.taskQueueRepository.update(freshStop);
             try { await this.saveChatEvent(workspaceId, agent.id, freshStop, 'OUTBOUND', 'response', stopMsg, groupId); } catch {}
           }
+          recordRunUsage('stopped');
           this.trace.close(runId, agent.id, workspaceId, task.id, 'stopped', lastStopReason || 'user_stop', durationMs, false).catch(() => {});
           agentEventEmitter.emit('agent:run:finished', { agentId: agent.id, workspaceId, taskId: task.id, runId, outcome: 'stopped', stopReason: lastStopReason || 'user_stop', aborted: true, willRetry: false, durationMs, emittedAt: Date.now() });
           return;
@@ -904,6 +931,7 @@ export class AgentRunnerService implements OnModuleInit {
           (task as any).response = `⚠️ Error de ejecución: ${String(finalErr).slice(0, 600)}`;
           await this.taskQueueRepository.update(task);
           await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', (task as any).response, groupId).catch(() => {});
+          recordRunUsage('error');
           this.trace.error(runId, agent.id, workspaceId, task.id, 'prompt_failed', String(finalErr)).catch(() => {});
           this.trace.close(runId, agent.id, workspaceId, task.id, 'error', lastStopReason || undefined, durationMs, false).catch(() => {});
           agentEventEmitter.emit('agent:run:error', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'prompt_failed', message: finalErr, emittedAt: Date.now() });
@@ -920,6 +948,7 @@ export class AgentRunnerService implements OnModuleInit {
           (task as any).response = msg;
           await this.taskQueueRepository.update(task);
           await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', msg, groupId).catch(() => {});
+          recordRunUsage('output_length_no_action');
           this.trace.error(runId, agent.id, workspaceId, task.id, 'output_length_exhausted_no_action', JSON.stringify({ stopReason: lastStopReason, delegatedThisRun, toolCallsTotal, nudged: retryNudged })).catch(() => {});
           this.trace.close(runId, agent.id, workspaceId, task.id, 'output_length_no_action', lastStopReason || undefined, durationMs, false).catch(() => {});
           agentEventEmitter.emit('agent:run:warning', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'output_length_exhausted_no_action', message: 'Exhausted length with no action/response after retry', emittedAt: Date.now() });
@@ -938,6 +967,7 @@ export class AgentRunnerService implements OnModuleInit {
         task.status = 'COMPLETED' as any;
         (task as any).response = responseText;
         await this.taskQueueRepository.update(task);
+        recordRunUsage(outcome);
         this.trace.close(runId, agent.id, workspaceId, task.id, outcome, lastStopReason || undefined, durationMs, false).catch(() => {});
         agentEventEmitter.emit('agent:run:finished', { agentId: agent.id, workspaceId, taskId: task.id, runId, outcome, stopReason: lastStopReason, willRetry: false, aborted: false, durationMs, emittedAt: Date.now() });
         // Delegation return (progress vs final):
@@ -1159,6 +1189,7 @@ export class AgentRunnerService implements OnModuleInit {
     }
     this.activeSessions.delete(agentId);
     this.systemPromptInjected.delete(agentId);
+    this.systemPromptHashByAgent.delete(agentId);
     this.currentTaskByAgent.delete(agentId);
     this.pendingByAgent.delete(agentId);
     this.processingAgents.delete(agentId);
@@ -1183,6 +1214,7 @@ export class AgentRunnerService implements OnModuleInit {
           // sp already includes agent additional_instruction (PromptBuilder.buildSystem); do not append it again.
           const ctx = `[SYSTEM CONTEXT · injected by Pi-Hive (post-clear)]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${agent.workspace_id}).\n\n${sp}`;
           await AgentChatEventEntity.create({ workspace_id: agent.workspace_id, agent_id: agent.id, task_id: null, parent_task_id: null, direction: 'OUTBOUND', kind: 'system_prompt', content: ctx, collapsible_group_id: `system-${agent.id}-${Date.now()}`, created_at: new Date() } as any);
+          this.systemPromptHashByAgent.set(agentId, createHash('sha1').update(String(sp)).digest('hex'));
         }
       } catch {}
     }

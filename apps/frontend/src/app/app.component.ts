@@ -27,6 +27,7 @@ import { effortFull, effortShort } from './core/utils/thinking-level.util';
             <a [routerLink]="workspacePath('swarm-monitor')" routerLinkActive="active">Swarm</a>
             <a [routerLink]="workspacePath('memory-timeline')" routerLinkActive="active">Memory</a>
             <a [routerLink]="workspacePath('human-in-the-loop')" routerLinkActive="active">HITL</a>
+            <a [routerLink]="workspacePath('consumption')" routerLinkActive="active">Consumo</a>
           }
         </nav>
         <div class="ws-actions" *ngIf="activeWs && !onWorkspacesPage">
