@@ -54,4 +54,14 @@ export class ConsumptionService {
   resetAgentUsage(agentId: string): Observable<{ ok: boolean; usage_reset_at?: string | null }> {
     return this.http.put<{ ok: boolean; usage_reset_at?: string | null }>(`${BASE_URL}/agents/${encodeURIComponent(agentId)}/usage/reset`, {});
   }
+
+  // Reset visible current-session consumption for all agents (sets usage_reset_at). Workspace totals/history remain.
+  resetWorkspaceUsage(workspaceId: string): Observable<{ ok: boolean; reset?: number }> {
+    return this.http.put<{ ok: boolean; reset?: number }>(`${BASE_URL}/workspaces/${encodeURIComponent(workspaceId)}/usage/reset`, {});
+  }
+
+  // Reset accumulated workspace consumption/history (clears persisted run_usage traces).
+  resetWorkspaceUsageHistory(workspaceId: string): Observable<{ ok: boolean; deleted?: number }> {
+    return this.http.put<{ ok: boolean; deleted?: number }>(`${BASE_URL}/api/traces/usage/workspace/${encodeURIComponent(workspaceId)}/reset`, {});
+  }
 }

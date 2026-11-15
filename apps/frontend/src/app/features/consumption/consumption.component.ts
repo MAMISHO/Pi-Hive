@@ -40,20 +40,28 @@ interface AgentUsageRow {
         <div>
           <div class="eyebrow">Workspace</div>
           <h2>Consumo</h2>
-          <p class="sub">Tokens y coste acumulados del workspace, con vista de sesión actual por agente. El reseteo por agente solo afecta su sesión visible, no el histórico del workspace.</p>
+          <p class="sub">Tokens y coste acumulados del workspace, con vista de sesión actual por agente. El reseteo de sesión (en vivo o por agente) solo afecta la sesión visible; el reseteo del total elimina el histórico acumulado del workspace.</p>
         </div>
-        <div class="header-actions"><button pButton type="button" icon="pi pi-refresh" label="Actualizar" class="p-button-text p-button-sm" (click)="reload(true)"></button></div>
+        <div class="header-actions">
+          <button pButton type="button" icon="pi pi-refresh" label="Actualizar" class="p-button-text p-button-sm" (click)="reload(true)"></button>
+        </div>
       </div>
 
       <section class="summary-grid">
         <article class="card hero">
-          <div class="kicker">Total workspace</div>
+          <div class="card-top">
+            <div class="kicker">Total workspace</div>
+            <button pButton type="button" icon="pi pi-replay" label="Resetear todo" class="p-button-text p-button-sm p-button-danger" (click)="resetAll()" [disabled]="!ws || !agentRows.length" title="Resetear el consumo visible de sesión de todos los agentes del workspace (no afecta al total/histórico acumulado)"></button>
+          </div>
           <div class="big">{{ fmtNum(wsTotals.totalTokens) }} <span>tok</span></div>
           <div class="muted">{{ fmtCost(wsTotals.cost.total) }} · {{ wsTotals.costFromProvider ? 'coste reportado' : 'coste estimado' }}</div>
           <div class="meta-line"><span>{{ workspaceRuns.length }} ejecuciones</span><span>{{ agentRows.length }} agentes (histórico)</span></div>
         </article>
         <article class="card">
-          <div class="kicker">Sesión en vivo (workspace)</div>
+          <div class="card-top">
+            <div class="kicker">Sesión en vivo (workspace)</div>
+            <button pButton type="button" icon="pi pi-replay" label="Resetear sesión" class="p-button-text p-button-sm" (click)="resetLiveSession()" [disabled]="!ws" title="Resetear el consumo visible de la sesión en curso (agentes y vista en vivo; no afecta al total/histórico acumulado)"></button>
+          </div>
           <div class="big sm">{{ fmtNum(liveTotals.totalTokens) }} <span>tok</span></div>
           <div class="muted">{{ fmtCost(liveTotals.cost.total) }} · tiempo real</div>
           <div class="meta-line"><span>{{ liveRuns.length }} ejecuciones activas</span></div>
@@ -162,6 +170,8 @@ interface AgentUsageRow {
     .grid.two { display:grid; grid-template-columns: 1.2fr 1fr; gap:12px; }
     .card { background: var(--bg-secondary); border:1px solid var(--border-color); border-radius: 12px; padding: 14px; min-width:0; }
     .card.hero { background: linear-gradient(145deg, rgba(88,166,255,0.12), rgba(22,27,34,0.9)); border-color: rgba(88,166,255,0.25); }
+    .card-top { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:4px; }
+    .card-top .kicker { margin-bottom:0; }
     .kicker { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color: var(--text-muted); margin-bottom:6px; }
     .big { font-size:30px; font-weight:700; color: var(--text-primary); font-variant-numeric: tabular-nums; line-height:1.1; }
     .big.sm { font-size:24px; } .big span { font-size:14px; color: var(--text-muted); font-weight:600; }
@@ -281,6 +291,36 @@ export class ConsumptionComponent implements OnInit, OnDestroy {
     this.consumption.resetAgentUsage(r.agentId).subscribe({
       next: () => { this.feedback.success(`Consumo de sesión reseteado para ${r.nickname}.`); this.tokenUsage.clearAgent(r.agentId); this.reload(); },
       error: (e) => this.feedback.error(e?.error?.message || 'No se pudo resetear el consumo de sesión')
+    });
+  }
+
+  async resetAll(): Promise<void> {
+    if (!this.ws) return;
+    const ok = await this.feedback.confirm({
+      title: 'Resetear consumo del workspace',
+      message: `¿Resetear todo el consumo acumulado (total e histórico) del workspace "${this.ws.name}"?\nEsto eliminará el histórico de ejecuciones registrado y pondrá a cero los totales del workspace. Esta acción no se puede deshacer.`,
+      confirmLabel: 'Resetear todo',
+      danger: true
+    });
+    if (!ok) return;
+    this.consumption.resetWorkspaceUsageHistory(this.ws.id).subscribe({
+      next: () => { this.feedback.success('Consumo total del workspace reseteado.'); this.tokenUsage.clearAll(); this.reload(); },
+      error: (e) => this.feedback.error(e?.error?.message || 'No se pudo resetear el consumo del workspace')
+    });
+  }
+
+  async resetLiveSession(): Promise<void> {
+    if (!this.ws) return;
+    const ok = await this.feedback.confirm({
+      title: 'Resetear sesión en curso',
+      message: `¿Resetear el consumo visible de la sesión en curso del workspace "${this.ws.name}" (agentes y vista en vivo)?\nEl total acumulado/histórico del workspace no se modificará.`,
+      confirmLabel: 'Resetear sesión',
+      danger: false
+    });
+    if (!ok) return;
+    this.consumption.resetWorkspaceUsage(this.ws.id).subscribe({
+      next: (res) => { this.feedback.success(`Sesión en curso reseteada para ${res?.reset ?? 'todos los'} agentes.`); this.tokenUsage.clearAll(); this.reload(); },
+      error: (e) => this.feedback.error(e?.error?.message || 'No se pudo resetear la sesión en curso')
     });
   }
 

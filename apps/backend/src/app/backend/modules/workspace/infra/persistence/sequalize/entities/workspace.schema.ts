@@ -25,6 +25,9 @@ export class WorkspaceEntity extends Model<IWorkspace> {
   @Column({ type: DataType.TEXT, allowNull: true })
   workspace_prompt: string | null;
 
+  @Column({ type: DataType.TEXT, allowNull: true })
+  role_bindings: string | null;
+
   @Column({ type: DataType.BOOLEAN, defaultValue: false })
   hitl_enabled: boolean;
 

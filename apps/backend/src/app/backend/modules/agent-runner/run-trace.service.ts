@@ -119,6 +119,10 @@ export class RunTraceService {
     if (src.costFromProvider || c.totalFromProvider) dst.costFromProvider = true;
   }
 
+  async clearWorkspaceUsage(workspaceId: string): Promise<number> {
+    return AgentRunLogEntity.destroy({ where: { workspace_id: workspaceId, event_type: 'run_usage' } as any });
+  }
+
   async getWorkspaceUsage(workspaceId: string): Promise<any> {
     const rows = await AgentRunLogEntity.findAll({
       where: { workspace_id: workspaceId, event_type: 'run_usage' } as any,

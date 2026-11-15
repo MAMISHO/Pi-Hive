@@ -53,6 +53,96 @@ function paradaToText(p: DelegationParada | string | null | undefined): string {
 
 @Injectable()
 export class DelegationPlanStore {
+  /** Ensure the agent invoking plan_delegation owns a runnable entry node. */
+  normalizeEntryOwnership(nodes: DelegationNode[], entryOwner: string): { nodes: DelegationNode[]; wrapped: number } {
+    const roots: DelegationNode[] = [];
+    const wrappers = new Map<string, DelegationNode>();
+    const usedIds = new Set<string>();
+    const collectIds = (items: DelegationNode[]) => {
+      for (const item of items || []) { usedIds.add(String(item.id)); collectIds(item.children || []); }
+    };
+    collectIds(nodes || []);
+    let wrapped = 0;
+    const normNick = (value: string) => norm(value);
+    const findDelegateParent = (items: DelegationNode[], owner: string): DelegationNode | null => {
+      for (let i = items.length - 1; i >= 0; i--) {
+        const item = items[i];
+        const nested = findDelegateParent(item.children || [], owner);
+        if (nested) return nested;
+        if (item.delegate_to && normNick(item.delegate_to) === normNick(owner)) return item;
+      }
+      return null;
+    };
+    const makeEntry = (target: string): DelegationNode => {
+      let id = `__entry__${wrapped + 1}`;
+      while (usedIds.has(id)) id = `__entry__${Number(id.replace('__entry__', '')) + 1}`;
+      usedIds.add(id);
+      return ({
+      id,
+      owner: entryOwner,
+      delegate_to: target,
+      action: `Inicia la ruta delegando al responsable ${target} y recibe su resultado final.`,
+      deliver_to: target,
+      stop: `El responsable ${target} completa su tramo y devuelve el resultado o un bloqueo.`,
+      status: 'PENDING',
+      result_ref: null,
+      result_summary: null,
+      error: null,
+      children: [],
+      });
+    };
+
+    for (const node of nodes || []) {
+      if (normNick(node.owner) === normNick(entryOwner)) {
+        roots.push(node);
+        continue;
+      }
+      const parent = findDelegateParent(roots, node.owner);
+      if (parent) {
+        parent.children ||= [];
+        parent.children.push(node);
+        continue;
+      }
+      const key = normNick(node.owner);
+      let entry = wrappers.get(key);
+      if (!entry) {
+        entry = makeEntry(node.owner);
+        wrapped++;
+        wrappers.set(key, entry);
+        roots.push(entry);
+      }
+      entry.children ||= [];
+      entry.children.push(node);
+    }
+    return { nodes: roots, wrapped };
+  }
+
+  formatCanonicalPlan(nodes: DelegationNode[], parada: DelegationParada | string | null): string {
+    const lines: string[] = ['PLAN (v2, todos PENDING):'];
+    const visit = (items: DelegationNode[], indent = '') => {
+      for (const node of items || []) {
+        const route = node.delegate_to ? ` → ${node.delegate_to}` : '';
+        lines.push(`${indent}${node.id} [${String(node.status || 'PENDING')}] ${node.owner}${route}: ${node.action}`);
+        visit(node.children || [], `${indent}  `);
+      }
+    };
+    visit(nodes);
+    lines.push(`PARADA: ${paradaToText(parada)}`);
+    return lines.join('\n');
+  }
+
+  markDelegatedBranchDone(node: DelegationNode, resultTaskId: number): void {
+    const mark = (current: DelegationNode) => {
+      const state = String(current.status || '').toUpperCase();
+      if (state !== 'FAILED' && state !== 'BLOCKED') {
+        current.status = 'DONE';
+        current.result_ref = resultTaskId;
+      }
+      for (const child of current.children || []) mark(child);
+    };
+    mark(node);
+  }
+
   async create(plan: { plan_ref: number; root_task_id: number; workspace_id: string | null; owner_agent_id: string; requester: string | null; raw_text: string; schema: 'v2'; nodes: DelegationNode[]; parada: DelegationParada | string | null; cursor?: number; state: 'active' | 'done' | 'aborted' | 'failed' }): Promise<void> {
     const payload = { schema: 'v2', nodes: plan.nodes || [] };
     const existing = await DelegationPlanEntity.findByPk(plan.plan_ref).catch(() => null);
@@ -168,13 +258,17 @@ export class DelegationPlanStore {
     return acc;
   }
 
-  // Render subplan nested inside a node (children) for transmission when delegating (minimal, no owner/delivery noise)
+  private formatPlanNode(node: DelegationNode): string {
+    const target = node.delegate_to ? ` → ${node.delegate_to}` : '';
+    return `${node.id} [${String(node.status || 'PENDING').toUpperCase()}] ${node.owner}${target}: ${node.action}`;
+  }
+
+  // Preserve owner and handoff edges: hiding them made the same action look like each reader's responsibility.
   private renderSubplan(nodes: DelegationNode[] | undefined, indent = ''): string[] {
     if (!nodes || !nodes.length) return [];
     const out: string[] = [];
     for (const n of nodes) {
-      const st = `[${String(n.status || 'PENDING').toUpperCase()}]`;
-      out.push(`${indent}${n.id} ${st} acción: ${n.action}`);
+      out.push(`${indent}${this.formatPlanNode(n)}`);
       if (n.children && n.children.length) out.push(...this.renderSubplan(n.children, indent + '  '));
     }
     return out;
@@ -192,10 +286,9 @@ export class DelegationPlanStore {
     }
     const lines: string[] = [];
     for (const n of owned) {
-      const st = `[${String(n.status || 'PENDING').toUpperCase()}]`;
-      lines.push(`${n.id} ${st} acción: ${n.action}`);
+      lines.push(this.formatPlanNode(n));
       if (n.delegate_to && n.children && n.children.length) {
-        lines.push(`  Subtareas delegadas:`);
+        lines.push(`  Subtramo de ${n.delegate_to}:`);
         lines.push(...this.renderSubplan(n.children, '    '));
       }
       if (n.result_ref) lines.push(`  resultado: #${n.result_ref}`);
@@ -203,10 +296,10 @@ export class DelegationPlanStore {
     }
     return [
       `[DELEGATION PLAN · plan_ref=${plan.plan_ref} · state=${plan.state}]`,
-      'Tus tareas (ejecuta en orden, la primera pendiente):',
+      `Responsabilidad: ${agentNickname}. Ejecuta solo nodos donde eres owner; sigue el orden indicado.`,
       ...lines,
       `PARADA: ${paradaText}`,
-      'Regla: ejecuta solo tus tareas en orden. Si una tarea implica delegar a otro agente, delega SOLO el sub-tramo del receptor (nodo hijo) reescrito en segunda persona: su acción, entrada y entrega; NO copies el plan completo ni pasos de otros. Si es acción propia, ejecútala y entrega el resultado. Al recibir [DELEGATION RESULT|FINAL] integra el dato y completa la tarea; si hay fallo/bloqueo irrecuperable propaga el error al solicitante. No explores filesystem/código ni trates branch/depth/path como rutas. No repitas tareas resueltas.',
+      'Si eres owner de un nodo con “→ agente”, delega ese nodo a ese agente usando solo su acción y subtareas; termina el turno. No ejecutes nodos propiedad de otros. En [DELEGATION RESULT|FINAL], integra el dato y continúa solo con tu siguiente nodo pendiente. No inventes resultados ni repitas tareas resueltas.',
     ].join('\n');
   }
 

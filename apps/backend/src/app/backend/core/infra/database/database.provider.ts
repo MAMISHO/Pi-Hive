@@ -84,7 +84,23 @@ export const databaseProviders = [
             await sequelize.query("ALTER TABLE workspaces ADD COLUMN workspace_prompt TEXT;");
             console.log('[DB] added workspaces.workspace_prompt');
           }
+          if (!wnames.has('role_bindings')) {
+            await sequelize.query("ALTER TABLE workspaces ADD COLUMN role_bindings TEXT;");
+            console.log('[DB] added workspaces.role_bindings');
+          }
         } catch (e) { console.warn('[DB] workspaces migrate:', (e as any)?.message || e); }
+        try {
+          const [ecols]: any = await sequelize.query("PRAGMA table_info(agent_chat_events);");
+          const enames = new Set((ecols || []).map((c: any) => c.name));
+          if (!enames.has('request_id')) {
+            await sequelize.query("ALTER TABLE agent_chat_events ADD COLUMN request_id VARCHAR(255);");
+            console.log('[DB] added agent_chat_events.request_id');
+          }
+          if (!enames.has('request_parent_id')) {
+            await sequelize.query("ALTER TABLE agent_chat_events ADD COLUMN request_parent_id VARCHAR(255);");
+            console.log('[DB] added agent_chat_events.request_parent_id');
+          }
+        } catch (e) { console.warn('[DB] agent_chat_events migrate:', (e as any)?.message || e); }
         console.log('Database synchronized (alter).');
 
         // Seed/refresh immutable default system prompt (global) from catalog files

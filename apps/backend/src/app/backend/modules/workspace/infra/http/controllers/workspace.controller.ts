@@ -105,6 +105,20 @@ export class WorkspaceController {
     return { ok: true, cleared: sorted.length };
   }
 
+  @Put(':id/usage/reset')
+  async resetWorkspaceUsage(@Param('id') id: string): Promise<{ ok: boolean; reset: number }> {
+    const agents = await AgentEntity.findAll({ where: { workspace_id: id } as any });
+    const now = new Date();
+    let reset = 0;
+    for (const a of agents) {
+      if ((a as any).archived_at) continue;
+      await a.update({ usage_reset_at: now } as any);
+      reset++;
+      agentEventEmitter.emit('agent:usage:reset', { agentId: a.get('id'), workspaceId: id, usage_reset_at: now });
+    }
+    return { ok: true, reset };
+  }
+
   @Delete(':id')
   async remove(@Param('id') id: string): Promise<{ ok: boolean }> {
     await TaskQueueEntity.destroy({ where: { workspace_id: id } as any }).catch(()=>{});

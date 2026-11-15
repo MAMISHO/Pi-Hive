@@ -21,6 +21,8 @@ import { DelegationPlanStore } from './delegation-plan.store.js';
 import { AppSettingsService } from '../app-settings/app-settings.service.js';
 import { buildReceiverScopedInstruction } from './delegation-instruction.js';
 import { detectCopyPasteInstruction } from './delegation-instruction-guard.js';
+import { explicitlyRequestsAgent } from './delegation-plan-validation.js';
+import { allowedToolsForTaskFlow, buildPlannerRoster, explicitRecipientFromRequest, formatDelegationProgressSummary, selectCallbackInstruction } from './delegation-runtime-policy.js';
 import { taskEventEmitter } from '../task-queue/infra/persistence/sequalize/entities/task-queue.schema.js';
 import { AgentStatus } from '../agent/domain/models/agent-status.enum.js';
 import { AgentSessionHistoryEntity } from '../session-history/infra/persistence/sequalize/entities/agent-session-history.schema.js';
@@ -206,6 +208,22 @@ export class AgentRunnerService implements OnModuleInit {
     return task?.task_flow === 'delegation_result' || task?.task_flow === 'delegation_progress';
   }
 
+  private async isCallbackAtUserRoot(task: ITaskQueue, agentId: string): Promise<boolean> {
+    let current: any = task;
+    const seen = new Set<number>();
+    for (let i = 0; i < 16 && current?.parent_task_id; i++) {
+      const parentId = Number(current.parent_task_id);
+      if (!Number.isFinite(parentId) || seen.has(parentId)) break;
+      seen.add(parentId);
+      current = await this.taskQueueRepository.get(parentId).catch(() => null);
+      if (!current) break;
+      if ((current.task_flow || 'direct') === 'direct' && current.receiver_agent_id === agentId) {
+        return current.sender_agent_id === 'user';
+      }
+    }
+    return false;
+  }
+
   private async handlePendingTask(task: ITaskQueue): Promise<void> {
     console.log(`[AgentRunner] handlePending id=${task.id} receiver=${task.receiver_agent_id} status=${task.status} flow=${(task as any).task_flow} depth=${(task as any).depth ?? 0}`);
     if (task.status !== 'PENDING') return;
@@ -295,9 +313,28 @@ export class AgentRunnerService implements OnModuleInit {
     let finalized = false;
     const finalizeOnce = async (fn: () => Promise<void>) => { if (finalized) return; finalized = true; await fn(); };
     try {
+      if ((task as any).task_flow === 'delegation_progress') {
+        const response = `Progreso registrado para la request #${task.id}; espero el resultado final.`;
+        (task as any).response = response;
+        task.status = 'COMPLETED' as any;
+        await this.taskQueueRepository.update(task);
+        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', response, groupId).catch(() => {});
+        agent.status = AgentStatus.IDLE;
+        await this.agentRepository.update(agent);
+        this.currentTaskByAgent.delete(agent.id);
+        this.emitStatus(agent.id, AgentStatus.IDLE, workspaceId, task.id, runId, 'progress_recorded');
+        this.emitQueueState(agent.id, workspaceId);
+        this.trace.record({ runId, agentId: agent.id, eventType: 'callback_progress_recorded', taskId: task.id, workspaceId,
+          eventData: { sender_agent_id: task.sender_agent_id, parent_task_id: task.parent_task_id, depth: (task as any).depth ?? 0 } }).catch(() => {});
+        agentEventEmitter.emit('agent:run:finished', { agentId: agent.id, workspaceId, taskId: task.id, runId, outcome: 'progress_recorded', emittedAt: Date.now() });
+        return;
+      }
       const workspace = await this.workspaceRepository.get(workspaceId);
       const cwd = (workspace?.path && fs.existsSync(workspace.path)) ? workspace.path : process.cwd();
       const availableAgents = await this.identityResolverService.getAvailableAgents(workspaceId);
+      let explicitChiefRecipient = agent.role === 'CHIEF' && task.sender_agent_id === 'user'
+        ? explicitRecipientFromRequest(task.payload, availableAgents.filter((a: any) => a.id !== agent.id))
+        : null;
 
       const resolved = await this.resolveAgentModel(agent);
       if (!resolved.ok) {
@@ -324,6 +361,8 @@ export class AgentRunnerService implements OnModuleInit {
       const agentModelRaw = resolved.raw;
 
       const taskQueueRepository = this.taskQueueRepository;
+      const workspaceRepository = this.workspaceRepository;
+      const agentRepository = this.agentRepository;
       const identityResolverService = this.identityResolverService;
       const delegationPlannerService = this.delegationPlanner;
       const traceService = this.trace;
@@ -335,13 +374,28 @@ export class AgentRunnerService implements OnModuleInit {
       const parentDepthPath = String((task as any).depth_path || `/root/${agent.nickname}`);
       const flowForTools = (task as any).task_flow || 'direct';
       const isProgressFlowForTools = flowForTools === 'delegation_progress';
-      const rosterForPlanner = availableAgents
-        .filter((a: any) => a.id !== agent.id)
-        .map((a: any) => ({ nickname: a.nickname, role: a.role, id: a.id }));
+      // The planner validates both delegated targets and local step owners; include the caller
+      // as an eligible owner while delegate_task itself continues to exclude self-targeting.
+      const rosterForPlanner = buildPlannerRoster(agent, availableAgents);
 
       let delegatedThisRun = false;
+      let delegatedProgressSummary = '';
       let delegationPlannedThisRun = false;
       let activePlanRef: number | null = (task as any).plan_ref ?? null;
+      let sessionForToolLoopAbort: any = null;
+      let forcedToolLoopStop: string | null = null;
+      let lastBlockedDelegationSignature = '';
+      let repeatedBlockedDelegationCount = 0;
+      const blockPlanDelegation = (signature: string, message: string) => {
+        if (signature === lastBlockedDelegationSignature) repeatedBlockedDelegationCount++;
+        else { lastBlockedDelegationSignature = signature; repeatedBlockedDelegationCount = 1; }
+        if (repeatedBlockedDelegationCount >= 3 && !forcedToolLoopStop) {
+          forcedToolLoopStop = `La misma delegación fue bloqueada ${repeatedBlockedDelegationCount} veces. ${message}`;
+          traceService.record({ ...runCtx, eventType: 'delegation_tool_loop_stopped', eventData: { target: signature.split('|')[0], repeats: repeatedBlockedDelegationCount, reason: message.slice(0, 240) } }).catch(() => {});
+          setTimeout(() => { void sessionForToolLoopAbort?.abort?.().catch?.(() => {}); }, 0);
+        }
+        return { content: [{ type: 'text' as const, text: repeatedBlockedDelegationCount >= 3 ? `${forcedToolLoopStop} No repitas la llamada; el turno se cerrará en estado HOLD para reintento.` : message }], details: { taskId: 0, blocked: true, repeated: repeatedBlockedDelegationCount } } as any;
+      };
 
       // Resolve delegation plan state for this branch (optional: absent => normal no-plan flow).
       const resolvePlanRefFromChain = async (): Promise<number | null> => {
@@ -383,8 +437,7 @@ export class AgentRunnerService implements OnModuleInit {
         if (!node && ownedPending.length === 1) node = ownedPending[0];
         if (node) {
           if (node.delegate_to && senderNick && norm(node.delegate_to) !== norm(senderNick)) return;
-          node.status = 'DONE';
-          node.result_ref = Number(task.id);
+          planStore.markDelegatedBranchDone(node, Number(task.id));
           if (!hasPending(activePlan.nodes)) activePlan.state = hasFailure(activePlan.nodes) ? 'failed' : 'done';
           await planStore.save(activePlan);
           traceService.record({ ...runCtx, eventType: (activePlan.state === 'done' || activePlan.state === 'failed') ? 'plan_closed' : 'plan_step_advanced', eventData: { plan_ref: activePlanRef, node_id: node.id, owner: agent.nickname, result_task: task.id, from: senderNick || null, state: activePlan.state } }).catch(() => {});
@@ -401,8 +454,24 @@ export class AgentRunnerService implements OnModuleInit {
           instruction: Type.String({ description: 'SOLO el tramo del agente destino (acción, entrada y entrega); NO el plan completo ni pasos de otros' }),
         }),
         async execute(_toolCallId, params) {
-          const target = await identityResolverService.resolveNickname(params.target_agent_nickname, workspaceId);
+          const requestedTarget = String(params.target_agent_nickname || '').trim();
+          let boundTarget: IAgent | null = null;
+          try {
+            const ws = await workspaceRepository.get(workspaceId);
+            const bindings = JSON.parse(String((ws as any)?.role_bindings || '{}'));
+            const boundId = bindings && typeof bindings === 'object' ? bindings[requestedTarget] : null;
+            if (boundId) {
+              const candidates = await agentRepository.getByWorkspace(workspaceId);
+              boundTarget = candidates.find((candidate: any) => candidate.id === boundId && candidate.archived_at == null) || null;
+            }
+          } catch { /* malformed/missing bindings preserve nickname resolution */ }
+          const target = boundTarget || await identityResolverService.resolveNickname(requestedTarget, workspaceId);
           if (!target) return { content: [{ type: 'text' as const, text: `Agent not found: "${params.target_agent_nickname}". Usa el nickname EXACTO (solo alias, ej. "Bob") de [EQUIPO].` }], details: { taskId: 0 } };
+          if (explicitChiefRecipient && target.nickname.toLowerCase() !== explicitChiefRecipient.toLowerCase()) {
+            const message = `Destinatario explícito: ${explicitChiefRecipient}. Como Chief, delega el objetivo completo a ese agente; no asumas su identidad ni delegues a otro miembro.`;
+            traceService.record({ ...runCtx, eventType: 'chief_recipient_enforced', eventData: { expected: explicitChiefRecipient, attempted: target.nickname } }).catch(() => {});
+            return { content: [{ type: 'text' as const, text: message }], details: { taskId: 0, blocked: true, reason: 'explicit_recipient_mismatch', expected: explicitChiefRecipient } } as any;
+          }
 
           // Guards de delegación (state-aware, anti-eco, sin romper continuación):
           // - PROGRESS (intermedio): no delegar ni tocar la subcadena; esperar RESULT final de la request.
@@ -440,16 +509,32 @@ export class AgentRunnerService implements OnModuleInit {
                 return { content: [{ type: 'text' as const, text: `Delegación bloqueada por tracking: ${planDeviation}` }], details: { taskId: 0, blocked: true } } as any;
               }
               if (!node.delegate_to) {
-                planDeviation = `El tracking (plan_ref=${p.plan_ref}, nodo ${node.id}) es acción propia de ${agent.nickname} (sin delegación). Ejecuta la acción del nodo y entrega el resultado.`;
-                traceService.record({ ...runCtx, eventType: 'plan_deviation', eventData: { plan_ref: p.plan_ref, node_id: node.id, expected: 'local_action', attempted: target.nickname } }).catch(() => {});
-                return { content: [{ type: 'text' as const, text: `Delegación bloqueada por tracking: ${planDeviation}` }], details: { taskId: 0, blocked: true } } as any;
-              }
-              if (norm(node.delegate_to) !== norm(target.nickname)) {
+                if (explicitlyRequestsAgent(node.action, target.nickname)) {
+                  // Repair a persisted malformed plan only when its own action names this
+                  // exact roster agent as the required participant and the worker has
+                  // supplied a receiver-scoped instruction. Keep the failure auditable.
+                  node.status = 'BLOCKED';
+                  node.error = `Plan inválido: la acción requiere a ${target.nickname}, pero delegate_to era null.`;
+                  p.state = 'aborted';
+                  p.raw_text = planStore.formatCanonicalPlan(p.nodes, p.parada);
+                  await planStore.save(p);
+                  traceService.record({ ...runCtx, eventType: 'delegation_plan_invalidated', eventData: { plan_ref: p.plan_ref, node_id: node.id, expected: target.nickname, reason: 'explicit_agent_action_missing_delegate' } }).catch(() => {});
+                  activePlanRef = null;
+                  activePlan = null;
+                  (task as any).plan_ref = null;
+                  await taskQueueRepository.update(task as any).catch(() => {});
+                } else {
+                  planDeviation = `El tracking (plan_ref=${p.plan_ref}, nodo ${node.id}) es acción propia de ${agent.nickname} (sin delegación). Ejecuta la acción del nodo y entrega el resultado.`;
+                  traceService.record({ ...runCtx, eventType: 'plan_deviation', eventData: { plan_ref: p.plan_ref, node_id: node.id, expected: 'local_action', attempted: target.nickname } }).catch(() => {});
+                  return blockPlanDelegation(`${target.nickname}|local_action|${node.id}`, `Delegación bloqueada por tracking: ${planDeviation}`);
+                }
+              } else if (norm(node.delegate_to) !== norm(target.nickname)) {
                 planDeviation = `El tracking (plan_ref=${p.plan_ref}, nodo ${node.id}) exige delegar a "${node.delegate_to}"; intentaste delegar a "${target.nickname}". Ejecuta el nodo indicado (respeta cadena/intermediarios).`;
                 traceService.record({ ...runCtx, eventType: 'plan_deviation', eventData: { plan_ref: p.plan_ref, node_id: node.id, expected: node.delegate_to, attempted: target.nickname } }).catch(() => {});
-                return { content: [{ type: 'text' as const, text: `Delegación bloqueada por tracking: ${planDeviation}` }], details: { taskId: 0, blocked: true } } as any;
+                return blockPlanDelegation(`${target.nickname}|${node.delegate_to}|${node.id}`, `Delegación bloqueada por tracking: ${planDeviation}`);
+              } else {
+                plannedNodeForDelegation = node;
               }
-              plannedNodeForDelegation = node;
             }
           }
 
@@ -509,6 +594,7 @@ export class AgentRunnerService implements OnModuleInit {
             created_at: new Date(),
           } as any);
           delegatedThisRun = true;
+          delegatedProgressSummary = formatDelegationProgressSummary(target.nickname, Number(newTask.id));
           return { content: [{ type: 'text' as const, text: `Delegated task ${newTask.id} to ${target.nickname} (depth ${nextDepth}${effectivePlanRef != null ? `, plan_ref ${effectivePlanRef}` : ''}). Recibirás un [DELEGATION RESULT] — NO esperes/pollees; completa tu turno y continúa cuando llegue.` }], details: { taskId: Number(newTask.id) } };
         },
       });
@@ -533,6 +619,14 @@ export class AgentRunnerService implements OnModuleInit {
             // Reuse only if it's an active v2 plan for this branch; never reuse terminal/legacy plans
             const reusable = !!(existing && existing.state === 'active' && existing.nodes?.length);
             if (reusable) {
+              const normalized = planStore.normalizeEntryOwnership(existing!.nodes, agent.nickname);
+              if (normalized.wrapped) {
+                existing!.nodes = normalized.nodes;
+                existing!.raw_text = planStore.formatCanonicalPlan(existing!.nodes, existing!.parada);
+                await planStore.save(existing!);
+                activePlan = existing;
+                traceService.record({ ...runCtx, eventType: 'delegation_plan_entry_normalized', eventData: { plan_ref: activePlanRef, entryWrappers: normalized.wrapped } }).catch(() => {});
+              }
               const view = planStore.formatForAgent(existing!, agent.nickname, Number((task as any).depth ?? 0));
               const count = existing!.nodes.length;
               return { content: [{ type: 'text' as const, text: `Ya existe un tracking activo para esta rama (plan_ref=${activePlanRef}). Síguelo paso a paso:\n${view}` }], details: { ok: true, plan_ref: activePlanRef, steps: count } } as any;
@@ -551,6 +645,7 @@ export class AgentRunnerService implements OnModuleInit {
               runtime: agentRuntime,
               userTask: plannerInputTask,
               roster: rosterForPlanner,
+              plannerNickname: agent.nickname,
               requesterLabel,
               cwd,
               idleTimeoutMs: 45_000,
@@ -568,8 +663,11 @@ export class AgentRunnerService implements OnModuleInit {
             activePlanRef = Number(currentTaskId);
             (task as any).plan_ref = activePlanRef;
             try { await taskQueueRepository.update(task as any); } catch {}
-            const planText = String(res.plan).trim();
-            const countSteps = res.nodes.length;
+            const normalized = planStore.normalizeEntryOwnership(res.nodes, agent.nickname);
+            const planNodes = normalized.nodes;
+            const planText = planStore.formatCanonicalPlan(planNodes, res.parada ?? null);
+            const countNodes = (nodes: any[]): number => nodes.reduce((sum, node) => sum + 1 + countNodes(node.children || []), 0);
+            const countSteps = countNodes(planNodes);
             await planStore.create({
               plan_ref: activePlanRef,
               root_task_id: Number(currentTaskId),
@@ -578,7 +676,7 @@ export class AgentRunnerService implements OnModuleInit {
               requester: (task as any).sender_agent_id === 'user' ? 'user' : String((task as any).sender_agent_id || 'unknown'),
               raw_text: planText,
               schema: 'v2',
-              nodes: res.nodes,
+              nodes: planNodes,
               parada: res.parada ?? null,
               cursor: 0,
               state: 'active',
@@ -588,15 +686,16 @@ export class AgentRunnerService implements OnModuleInit {
               workspace_id: workspaceId,
               agent_id: agent.id,
               task_id: Number(currentTaskId),
-              run_id: runId,
+              parent_task_id: task.parent_task_id ?? null,
+              request_id: `req:${Number(currentTaskId)}`,
+              request_parent_id: null,
               direction: 'OUTBOUND',
               kind: 'plan',
-              group_id: groupId,
-              seq: null,
               content: planText,
-              meta: { plan_ref: activePlanRef, steps: countSteps, schema: 'v2', plannerMs, firstActivityMs, plannerModel, structured: true, debug },
+              collapsible_group_id: groupId,
+              created_at: new Date(),
             } as any).catch(() => {});
-            traceService.record({ ...runCtx, eventType: 'delegation_planned', eventData: { ok: true, plannerMs, firstActivityMs, plannerModel, steps: countSteps, schema: 'v2', plan_ref: activePlanRef, structured: true, debug } }).catch(() => {});
+            traceService.record({ ...runCtx, eventType: 'delegation_planned', eventData: { ok: true, plannerMs, firstActivityMs, plannerModel, steps: countSteps, schema: 'v2', plan_ref: activePlanRef, structured: true, entryWrappers: normalized.wrapped, debug } }).catch(() => {});
             const view = activePlan ? planStore.formatForAgent(activePlan, agent.nickname, Number((task as any).depth ?? 0)) : planText;
             return { content: [{ type: 'text' as const, text: `Delegation tracking (sigue este plan; respeta PARADA; todos los nodos inician PENDING):\n${view}` }], details: { ok: true, plan_ref: activePlanRef, steps: countSteps, schema: 'v2', plannerMs, firstActivityMs, debug } } as any;
           } catch (e: any) {
@@ -606,9 +705,12 @@ export class AgentRunnerService implements OnModuleInit {
         },
       });
 
+      const isDelegationResult = (task as any).task_flow === 'delegation_result';
+      const isDelegationProgress = (task as any).task_flow === 'delegation_progress';
+      const isDelegationCallback = isDelegationResult || isDelegationProgress;
       let isResumed = false;
       let sessionManager: any;
-      if (agent.current_session_id && fs.existsSync(agent.current_session_id)) {
+      if (!isDelegationCallback && agent.current_session_id && fs.existsSync(agent.current_session_id)) {
         sessionManager = SessionManager.open(agent.current_session_id);
         isResumed = true;
         console.log(`[AgentRunner] resuming session ${agent.current_session_id}`);
@@ -619,9 +721,10 @@ export class AgentRunnerService implements OnModuleInit {
         console.log(`[AgentRunner] created session in ${sessionDir}`);
       }
 
-      const isDelegationResult = (task as any).task_flow === 'delegation_result';
-      const isDelegationProgress = (task as any).task_flow === 'delegation_progress';
-      const isDelegationCallback = isDelegationResult || isDelegationProgress;
+      if (isDelegationCallback && agent.current_session_id) {
+        this.trace.record({ runId, agentId: agent.id, eventType: 'callback_session_rotated', taskId: task.id, workspaceId,
+          eventData: { priorSessionDiscardedFromContext: true, flow: (task as any).task_flow } }).catch(() => {});
+      }
       const senderAgent = (task as any).sender_agent_id && (task as any).sender_agent_id !== 'user'
         ? await this.identityResolverService.resolveById?.((task as any).sender_agent_id) ?? (await this.identityResolverService.getAvailableAgents(workspaceId)).find((a: any) => a.id === (task as any).sender_agent_id) ?? null
         : null;
@@ -674,7 +777,18 @@ export class AgentRunnerService implements OnModuleInit {
         }
       };
       const originCtx = await resolveOriginContext();
+      const callbackAtUserRoot = isDelegationResult ? await this.isCallbackAtUserRoot(task, agent.id) : false;
       activePlan = await loadActivePlan();
+      const callbackFinalFlag = (task as any).callback_final;
+      const isRootFinalCallback = agent.role === 'CHIEF' && callbackAtUserRoot && isDelegationResult
+        && (callbackFinalFlag === true || callbackFinalFlag === 1 || callbackFinalFlag === '1')
+        && (!activePlan || activePlan.state !== 'active');
+      if (isRootFinalCallback && !explicitChiefRecipient && sender?.role !== 'USER') {
+        // A no-plan root result belongs to the agent that just closed this branch.
+        // Audits may request a correction there; they must not bypass it to reopen
+        // already completed sub-delegations.
+        explicitChiefRecipient = sender?.nickname || null;
+      }
       const activePlanBlock = activePlan
         ? (activePlan.schema === 'v2' ? planStore.formatForAgent(activePlan, agent.nickname, Number((task as any).depth ?? 0)) : planStore.formatForPrompt(activePlan))
         : null;
@@ -706,10 +820,26 @@ export class AgentRunnerService implements OnModuleInit {
         // degrade strong reminders in hot routine turns (resumed, direct, no plan/callback change, unchanged system)
         minimalTurn: continueIntent || (isResumed && !isDelegationCallback && !activePlanBlock && !!this.systemPromptInjected.has(agent.id) && !systemChanged),
         continueIntent,
+        isRootUserCallback: callbackAtUserRoot,
+        isRootFinalCallback,
       });
+      const promptSections = {
+        system: String(systemPrompt || ''),
+        turn: promptText,
+        task: String(task.payload || ''),
+        callback: isDelegationCallback ? String((task as any).callback_context || '') : '',
+        plan: String(activePlanBlock || ''),
+      };
+      const promptSize = this.promptBuilder.promptStats(promptSections);
+      this.trace.record({ runId, agentId: agent.id, eventType: 'prompt_size', taskId: task.id, workspaceId,
+        eventData: { estimateMethod: 'ceil(chars/4)', sections: promptSize,
+          totalEstimatedTokens: Math.ceil((String(systemPrompt || '').length + promptText.length) / 4) } }).catch(() => {});
       this.trace.record({ runId, agentId: agent.id, eventType: 'session', taskId: task.id, workspaceId, eventData: { resumedSession: isResumed, sessionId: agent.current_session_id || null, cwd, depth: (task as any).depth ?? 0, depth_path: (task as any).depth_path ?? null } }).catch(() => {});
       this.trace.record({ runId, agentId: agent.id, eventType: 'model', taskId: task.id, workspaceId, eventData: { provider: resolved.provider, modelId: resolved.modelId, raw: resolved.raw } }).catch(() => {});
-      if (isDelegationCallback) this.trace.record({ runId, agentId: agent.id, eventType: 'callback_received', taskId: task.id, workspaceId, eventData: { parent_task_id: task.parent_task_id, depth: (task as any).depth ?? 0, flow: (task as any).task_flow, final: (task as any).callback_final ?? null } }).catch(() => {});
+      if (isDelegationCallback) this.trace.record({ runId, agentId: agent.id, eventType: 'callback_received', taskId: task.id, workspaceId, eventData: {
+        parent_task_id: task.parent_task_id, depth: (task as any).depth ?? 0, flow: (task as any).task_flow,
+        final: (task as any).callback_final ?? null, finalAtUserRoot: isRootFinalCallback, planState: activePlan?.state ?? null,
+      } }).catch(() => {});
       console.log(`[AgentRunner] system prompt resolved for ${agent.nickname} (resumed=${isResumed}, callback=${(task as any).task_flow}, depth=${(task as any).depth ?? 0}, sysChanged=${systemChanged})`);
       this.trace.modelSet(runId, agent.id, workspaceId, task.id, resolved.provider, resolved.modelId).catch(() => {});
       agentEventEmitter.emit('agent:run:model', { runId, agentId: agent.id, taskId: task.id, state: 'ready', provider: resolved.provider, modelId: resolved.modelId, emittedAt: Date.now() });
@@ -742,9 +872,19 @@ export class AgentRunnerService implements OnModuleInit {
       try { agentDir = await this.appSettings.resolvePiAgentDir(); } catch { agentDir = path.join(process.cwd(), 'data', 'pi-agent'); }
       try { resourceLoader = new (DefaultResourceLoader as any)({ cwd, agentDir, systemPrompt }); } catch (e) { console.warn('[AgentRunner] DefaultResourceLoader unavailable, using prompt injection', e); }
       console.log(`[AgentRunner] prompt built (sys=${systemPrompt.length}, task=${promptText.length}), creating AgentSession model=${resolved.raw}...`);
-      const sessionOpts: any = { sessionManager, cwd, customTools: [delegateTaskTool, planDelegationTool], modelRuntime: resolved.runtime, model: resolved.model };
+      // Progress cannot plan; an active plan already defines the route. A RESULT without a
+      // plan may need to start a new multi-agent subchain, for any role, so retain the planner.
+      const planningAllowed = !isProgressFlowForTools && activePlan?.state !== 'active' && !explicitChiefRecipient;
+      const sessionTools = allowedToolsForTaskFlow((task as any).task_flow, agent.role, planningAllowed);
+      const customTools = [delegateTaskTool, ...(sessionTools.includes('plan_delegation') ? [planDelegationTool] : [])];
+      this.trace.record({ runId, agentId: agent.id, eventType: 'session_tools_configured', taskId: task.id, workspaceId,
+        eventData: { taskFlow: (task as any).task_flow || 'direct', role: agent.role, tools: sessionTools, customTools: customTools.map((tool: any) => tool.name), planningAllowed, activePlan: activePlan?.state === 'active' } }).catch(() => {});
+      const sessionOpts: any = { sessionManager, cwd, tools: sessionTools,
+        customTools,
+        modelRuntime: resolved.runtime, model: resolved.model };
       if (resourceLoader) sessionOpts.resourceLoader = resourceLoader;
       const { session, modelFallbackMessage } = await createAgentSession(sessionOpts) as any;
+      sessionForToolLoopAbort = session;
       if (modelFallbackMessage) {
         console.warn(`[AgentRunner] model fallback agent=${agent.id} task=${task.id}: ${modelFallbackMessage}`);
         agentEventEmitter.emit('agent:run:warning', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'model_fallback', message: modelFallbackMessage, emittedAt: Date.now() });
@@ -885,7 +1025,9 @@ export class AgentRunnerService implements OnModuleInit {
         discardStreamingEvents = true;
         thinkBuf = '';
         discardStreamingEvents = false;
-        await runPromptOnce(`[SYSTEM NUDGE · reintento automático]\nTu turno anterior se cortó por límite de longitud SIN completar ninguna acción ni respuesta. Responde AHORA de forma concisa y directa, en 1-2 líneas: ejecuta tu primer acto (plan_delegation si la tarea requiere cadena, o delegate_task al responsable directo, o entrega el resultado solicitado). NO repitas razonamiento ni expliques lo que vas a hacer, actúa.`);
+        await runPromptOnce(this.promptBuilder.buildLengthRetryNudge({
+          agent, taskPayload: task.payload, isDelegationResult, isRootUserCallback: callbackAtUserRoot, isRootFinalCallback, callbackContext: (task as any).callback_context ?? null,
+        }));
         text = assistantText.trim();
         stopped = !this.activeSessions.has(agent.id) || settledAborted;
       }
@@ -914,6 +1056,16 @@ export class AgentRunnerService implements OnModuleInit {
 
       await finalizeOnce(async () => {
         const durationMs = Date.now() - startedAt;
+        if (forcedToolLoopStop) {
+          const message = `⚠️ ${forcedToolLoopStop}`;
+          task.status = 'HOLD' as any;
+          (task as any).response = message;
+          await this.taskQueueRepository.update(task);
+          await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', message, groupId).catch(() => {});
+          recordRunUsage('delegation_tool_loop_stopped');
+          this.trace.close(runId, agent.id, workspaceId, task.id, 'delegation_tool_loop_stopped', lastStopReason || undefined, durationMs, false).catch(() => {});
+          return;
+        }
         if (stopped) {
           // stopAgent may have already finalized the task; do not create a new PENDING wake-up.
           const freshStop = await this.taskQueueRepository.get(task.id).catch(() => null);
@@ -963,6 +1115,7 @@ export class AgentRunnerService implements OnModuleInit {
         }
 
         const responseText = text || (delegatedThisRun ? '(delegación en curso; sin texto adicional)' : `(no text output, stopReason=${lastStopReason || 'unknown'})`);
+        const progressText = delegatedThisRun ? (delegatedProgressSummary || formatDelegationProgressSummary()) : responseText;
         const outcome = text ? 'completed' : (delegatedThisRun ? 'delegated' : 'completed_empty');
         if (!text && !delegatedThisRun) console.warn(`[AgentRunner] empty response task=${task.id} run=${runId} model=${resolved.raw} stopReason=${lastStopReason}`);
         const summaryText = responseText.slice(0, 500);
@@ -1065,7 +1218,7 @@ export class AgentRunnerService implements OnModuleInit {
                     depth_path: `${originPath}/result`,
                     parent_task_callback: true,
                     callback_final: true,
-                    callback_context: (origin as any)?.callback_context ?? (task as any).callback_context ?? (origin as any)?.payload ?? task.payload,
+                    callback_context: selectCallbackInstruction(origin, task),
                     plan_ref: cbPlanRef,
                     created_at: new Date(),
                   } as any);
@@ -1083,7 +1236,7 @@ export class AgentRunnerService implements OnModuleInit {
                   await this.taskQueueRepository.add({
                     sender_agent_id: agent.id,
                     receiver_agent_id: targetSender,
-                    payload: `[DELEGATION PROGRESS from ${agent.nickname} | state=PROGRESS(intermedio,no-final) | task=#${task.id} | request=#${origin?.id ?? task.id} | origin=#${origin?.id ?? task.id} | parent=#${(task as any).parent_task_id ?? '-'} | depth=${originDepth} | branch=${originPath}/progress]\n${responseText}`,
+                    payload: `[DELEGATION PROGRESS from ${agent.nickname} | state=PROGRESS(intermedio,no-final) | task=#${task.id} | request=#${origin?.id ?? task.id} | origin=#${origin?.id ?? task.id} | parent=#${(task as any).parent_task_id ?? '-'} | depth=${originDepth} | branch=${originPath}/progress]\n${progressText}`,
                     status: 'PENDING' as any,
                     parent_task_id: task.id,
                     workspace_id: workspaceId,
@@ -1092,7 +1245,7 @@ export class AgentRunnerService implements OnModuleInit {
                     depth_path: `${originPath}/progress`,
                     parent_task_callback: true,
                     callback_final: false,
-                    callback_context: (origin as any)?.callback_context ?? (task as any).callback_context ?? task.payload,
+                    callback_context: selectCallbackInstruction(origin, task),
                     plan_ref: cbPlanRef,
                     created_at: new Date(),
                   } as any);
@@ -1133,7 +1286,7 @@ export class AgentRunnerService implements OnModuleInit {
                 await this.taskQueueRepository.add({
                   sender_agent_id: agent.id,
                   receiver_agent_id: task.sender_agent_id,
-                  payload: `[DELEGATION PROGRESS from ${agent.nickname} | state=PROGRESS(intermedio,no-final) | task=#${task.id} | request=#${task.id} | origin=#${task.id} | parent=#${(task as any).parent_task_id ?? '-'} | depth=${cbDepth} | branch=${parentDepthPath}/progress]\n${responseText}`,
+                  payload: `[DELEGATION PROGRESS from ${agent.nickname} | state=PROGRESS(intermedio,no-final) | task=#${task.id} | request=#${task.id} | origin=#${task.id} | parent=#${(task as any).parent_task_id ?? '-'} | depth=${cbDepth} | branch=${parentDepthPath}/progress]\n${progressText}`,
                   status: 'PENDING' as any,
                   parent_task_id: task.id,
                   workspace_id: workspaceId,
@@ -1218,7 +1371,7 @@ export class AgentRunnerService implements OnModuleInit {
         if (String(sp || '').trim()) {
           // sp already includes agent additional_instruction (PromptBuilder.buildSystem); do not append it again.
           const ctx = `[SYSTEM CONTEXT · injected by Pi-Hive (post-clear)]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${agent.workspace_id}).\n\n${sp}`;
-          await AgentChatEventEntity.create({ workspace_id: agent.workspace_id, agent_id: agent.id, task_id: null, parent_task_id: null, direction: 'OUTBOUND', kind: 'system_prompt', content: ctx, collapsible_group_id: `system-${agent.id}-${Date.now()}`, created_at: new Date() } as any);
+          await AgentChatEventEntity.create({ workspace_id: agent.workspace_id, agent_id: agent.id, task_id: null, parent_task_id: null, request_id: null, request_parent_id: null, direction: 'OUTBOUND', kind: 'system_prompt', content: ctx, collapsible_group_id: `system-${agent.id}-${Date.now()}`, created_at: new Date() } as any);
           this.systemPromptHashByAgent.set(agentId, createHash('sha1').update(String(sp)).digest('hex'));
         }
       } catch {}
@@ -1243,8 +1396,35 @@ export class AgentRunnerService implements OnModuleInit {
     }
   }
 
+  private resolveChatRequestLink(task: ITaskQueue, kind: string): { requestId: string | null; requestParentId: string | null } {
+    const reqId = task?.id != null ? `req:${task.id}` : null;
+    const parentReqId = task?.parent_task_id != null ? `req:${task.parent_task_id}` : null;
+    if (kind === 'request' || kind === 'response') {
+      // requests: own request_id (+ parent request that triggered this delegated/callback request)
+      // responses: identified by the request they answer
+      return { requestId: reqId, requestParentId: kind === 'request' ? parentReqId : null };
+    }
+    // intermediate/system/plan events: associate to current request for traversal filtering
+    return { requestId: reqId, requestParentId: null };
+  }
+
   private async saveChatEvent(workspaceId: string, agentId: string, task: ITaskQueue, direction: 'INBOUND' | 'OUTBOUND', kind: string, content: string, groupId: string) {
-    try { await AgentChatEventEntity.create({ workspace_id: workspaceId, agent_id: agentId, task_id: task.id, parent_task_id: task.parent_task_id ?? null, direction, kind, content, collapsible_group_id: groupId, created_at: new Date() } as any); } catch {}
+    try {
+      const link = this.resolveChatRequestLink(task, kind);
+      await AgentChatEventEntity.create({
+        workspace_id: workspaceId,
+        agent_id: agentId,
+        task_id: task.id,
+        parent_task_id: task.parent_task_id ?? null,
+        request_id: link.requestId,
+        request_parent_id: link.requestParentId,
+        direction,
+        kind,
+        content,
+        collapsible_group_id: groupId,
+        created_at: new Date(),
+      } as any);
+    } catch {}
   }
 
   async refreshWorkspaceSystemPrompts(workspaceId: string): Promise<void> {

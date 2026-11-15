@@ -20,6 +20,12 @@ export class AgentChatEventEntity extends Model<IAgentChatEvent> {
   @Column(DataType.INTEGER)
   parent_task_id: number | null;
 
+  @Column({ type: DataType.STRING, allowNull: true })
+  request_id: string | null;
+
+  @Column({ type: DataType.STRING, allowNull: true })
+  request_parent_id: string | null;
+
   @Column(DataType.STRING)
   direction: string;
 

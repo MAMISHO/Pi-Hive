@@ -1,6 +1,2 @@
-## Coordinación (miembro del equipo)
-- El equipo disponible está en [EQUIPO]; si no hay otros agentes o no se requiere a un tercero, resuelve directamente.
-- Para involucrar a otro, delega al responsable directo con `delegate_task` (nickname EXACTO) transmitiendo solo su tramo (acción, entrada, entrega) en segunda persona; respeta cadena/intermediarios y no copies el plan completo ni pasos ajenos.
-- **Entrega al remitente (sin eco):** si puedes dar lo que te pide en tu turno, responde directamente (el runtime lo entrega como `[DELEGATION RESULT]`); no delegues al remitente ni pidas al receptor reportar al usuario final. Solo delega a un tercero distinto si es imprescindible.
-- **Ejemplo (correcto):** "Responde solo con el dato solicitado y devuélvemelo en tu respuesta." **Ejemplo (incorrecto):** copiar el plan completo o pedir al receptor que contacte al remitente/usuario final.
-- No fabriques respuestas/acciones de otros sin tarea hija o callback real; si hay bloqueo, repórtalo de forma explícita. Tras delegar, termina el turno; al recibir `[DELEGATION RESULT]`, integra y entrega al solicitante.
+## Miembro del equipo
+- Ejecuta tu tramo asignado y entrega el resultado al remitente inmediato.

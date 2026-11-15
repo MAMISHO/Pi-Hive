@@ -76,6 +76,12 @@ export class TokenUsageService implements OnDestroy {
     this.emit();
   }
 
+  clearAll(): void {
+    this.resetAtByAgent.clear();
+    this.runs.clear();
+    this.emit();
+  }
+
   private loadWorkspace(workspaceId: string | null, force = false): void {
     if (!force && this.loadedWorkspaceId === workspaceId) { this.emit(); return; }
     this.loadedWorkspaceId = workspaceId;

@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { DelegationNode, DelegationParada } from './delegation-plan.store.js';
 import { AppSettingsService } from '../app-settings/app-settings.service.js';
+import { findMissingExplicitDelegation } from './delegation-plan-validation.js';
 
 const FALLBACK_PLANNER_SKILL_PATH = path.join(process.cwd(), 'data', 'pi-agent', 'skills', 'delegation-planning', 'SKILL.md');
 
@@ -13,6 +14,7 @@ export interface DelegationPlanInput {
   runtime: any;
   userTask: string;
   roster: Array<{ nickname: string; role?: string; id?: string }>;
+  plannerNickname?: string;
   requesterLabel?: string; // e.g. "user" (not a roster agent)
   cwd: string;
   timeoutMs?: number; // legacy: treated as idle timeout
@@ -42,6 +44,7 @@ export interface DelegationPlannerDebug {
   toolCallUsed?: boolean;
   errorName?: string;
   errorStackHead?: string;
+  repairAttempts?: number;
 }
 
 export interface DelegationPlanResult {
@@ -157,17 +160,19 @@ function toCanonicalTextV2(nodes: DelegationNode[], parada: DelegationParada | s
 }
 
 // v2 only: strict schema/keys, no v1/legacy aliases or formats
-function parsePlanV2(obj: any, roster: Array<{ nickname: string }>): { ok: true; nodes: DelegationNode[]; parada: DelegationParada; plan: string } | { ok: false; reason: string } {
+export function parsePlanV2(obj: any, roster: Array<{ nickname: string }>, plannerNickname?: string): { ok: true; nodes: DelegationNode[]; parada: DelegationParada; plan: string } | { ok: false; reason: string } {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { ok: false, reason: 'planner_invalid_v2_object' };
   if (obj.schema !== 'v2') return { ok: false, reason: 'planner_v2_required' };
   if (!Array.isArray(obj.nodes)) return { ok: false, reason: 'planner_no_nodes' };
 
-  const validate = (arr: any[], pathPrefix: string, parentDelegateTo: string | null): DelegationNode[] | { err: string } => {
+  const validate = (arr: any[], pathPrefix: string, parentDelegateTo: string | null, parentOwner: string | null): DelegationNode[] | { err: string } => {
     const out: DelegationNode[] = [];
     for (let i = 0; i < arr.length; i++) {
       const s = arr[i] && typeof arr[i] === 'object' && !Array.isArray(arr[i]) ? arr[i] : {};
       const id = String(s.id || (pathPrefix ? `${pathPrefix}.${i + 1}` : `${i + 1}`)).trim();
-      const ownerRaw = String(s.owner ?? '').trim();
+      // Small local models often omit mechanically inferable fields. Recover only omissions;
+      // explicit unknown owners remain invalid so we never silently route work to another agent.
+      const ownerRaw = String(s.owner ?? '').trim() || parentDelegateTo || parentOwner || (!pathPrefix ? String(plannerNickname || '') : '');
       const owner = canonicalNick(roster, ownerRaw);
       if (!owner) return { err: `invalid_node_${id}_owner_not_in_roster:${ownerRaw || '(vacío)'}` };
       if (parentDelegateTo && normNick(owner) !== normNick(parentDelegateTo)) return { err: `invalid_node_${id}_owner_mismatch_parent_delegate:${ownerRaw}` };
@@ -180,15 +185,15 @@ function parsePlanV2(obj: any, roster: Array<{ nickname: string }>): { ok: true;
         delegate_to = dn;
       }
 
-      const action = String(s.action ?? '').trim();
-      const deliver_to = String(s.deliver_to ?? 'solicitante').trim() || 'solicitante';
-      const stop = String(s.stop ?? '').trim();
-      if (!action || !stop) return { err: `invalid_node_${id}_missing_fields` };
+      const action = String(s.action ?? s.instruction ?? s.task ?? s.description ?? '').trim();
+      const deliver_to = String(s.deliver_to ?? parentOwner ?? 'solicitante').trim() || 'solicitante';
+      const stop = String(s.stop ?? '').trim() || 'Completa la acción indicada y entrega el resultado a quien corresponda.';
+      if (!action) return { err: `invalid_node_${id}_missing_action` };
 
       const childrenRaw = Array.isArray(s.children) ? s.children : [];
       let children: DelegationNode[] = [];
       if (childrenRaw.length) {
-        const cv = validate(childrenRaw, id, delegate_to || owner);
+        const cv = validate(childrenRaw, id, delegate_to || owner, owner);
         if ((cv as any).err) return cv as any;
         children = cv as DelegationNode[];
       }
@@ -197,10 +202,12 @@ function parsePlanV2(obj: any, roster: Array<{ nickname: string }>): { ok: true;
     return out;
   };
 
-  const vr = validate(obj.nodes, '', null);
+  const vr = validate(obj.nodes, '', null, null);
   if ((vr as any).err) return { ok: false, reason: (vr as any).err };
   const nodes = vr as DelegationNode[];
   if (!nodes.length) return { ok: false, reason: 'planner_no_nodes' };
+  const explicitDelegationError = findMissingExplicitDelegation(nodes, roster);
+  if (explicitDelegationError) return { ok: false, reason: explicitDelegationError };
 
   let parada: DelegationParada = { ...DEFAULT_PARADA };
   const p = obj.parada;
@@ -214,14 +221,14 @@ function parsePlanV2(obj: any, roster: Array<{ nickname: string }>): { ok: true;
   return { ok: true, nodes, parada, plan: toCanonicalTextV2(nodes, parada) };
 }
 
-function parsePlan(text: string, roster: Array<{ nickname: string }>): (DelegationPlanResult & { ok: boolean; repaired?: boolean; parsePath?: string }) {
+function parsePlan(text: string, roster: Array<{ nickname: string }>, plannerNickname?: string): (DelegationPlanResult & { ok: boolean; repaired?: boolean; parsePath?: string }) {
   const raw = String(text || '').trim();
   if (!raw) return { ok: false, reason: 'planner_empty_response' };
   const { obj, repaired, parsePath } = extractJsonBlock(raw);
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
     return { ok: false, reason: 'planner_invalid_json_v2', reason_detail: 'invalid_or_truncated_v2_json', repaired, parsePath };
   }
-  const v2 = parsePlanV2(obj, roster);
+  const v2 = parsePlanV2(obj, roster, plannerNickname);
   if (v2.ok === true) return { ok: true, schema: 'v2', nodes: v2.nodes, parada: v2.parada, plan: v2.plan, repaired, parsePath };
   return { ok: false, reason: v2.reason, reason_detail: v2.reason, repaired, parsePath };
 }
@@ -246,6 +253,7 @@ export class DelegationPlannerService {
       'Respond with a single COMPLETE JSON object (schema v2), no markdown and no text outside the JSON. If your runtime supports it, you may instead call the tool `submit_delegation_plan` with the same object.',
       'Plan schema v2: {"schema":"v2","solicitante_raiz":"<requester>","parada":{"success":"...","on_failure":"...","assumes_result":false},"nodes":[{"id":"1","owner":"<nickname>","delegate_to":"<nickname|null>","action":"...","deliver_to":"<nickname|solicitante>","stop":"...","status":"PENDING","children":[]}]}',
       'Rules: use only exact nicknames from the ROSTER for owner/delegate_to (never invent). The requester/origin is NOT in the roster and must NEVER be owner/delegate_to (only in solicitante_raiz/deliver_to/parada for final delivery). Preserve the chain and intermediaries (no shortcuts). Every node status MUST be "PENDING".',
+      'If an action explicitly asks, tells, or waits for another roster agent to act/respond, set delegate_to to that exact agent and represent their work as child nodes owned by them. Never encode another agent\'s required action as a local node with delegate_to=null.',
       'Stop/parada are GENERAL completion criteria (all nodes resolved DONE/SKIPPED, or propagate irrecoverable FAILED/BLOCKED to requester) and must NEVER include or assume the expected result value (assumes_result=false). Structure the route; do not solve the task.',
       'NEVER solve or pre-execute the task and NEVER embed expected result values (no computed answers or result numbers) in action/stop/parada. Do not claim any agent already responded; plan so each step is actually delegated/executed.',
       'Keep the plan concise and complete (do not truncate).',
@@ -392,30 +400,33 @@ export class DelegationPlannerService {
 
       const userMessage = `[CONTEXT]\nSolicitante/origen (NO es un agente del roster, NO usar como owner/delegate_to): ${requesterLabel}\n\n[USER REQUEST]\n${String(userTask || '').trim() || '(vacía)'}\n\n[INSTRUCTION]\nReturn ONLY the JSON object (schema v2) in your reply, with no markdown and no text outside it. If you can call \`submit_delegation_plan\`, you may use it; otherwise reply with the JSON text.\nPlan: {"schema":"v2","solicitante_raiz":"${requesterLabel}","parada":{"success":"todos los nodos/subnodos resueltos (DONE/SKIPPED) y resultado entregado al solicitante original","on_failure":"propagar error/bloqueo irrecuperable al solicitante original y finalizar (replan solo si se solicita)","assumes_result":false},"nodes":[{"id":"1","owner":"nickname_roster","delegate_to":"nickname_roster_o_null","action":"...","deliver_to":"nickname_roster_o_solicitante","stop":"condición de cumplimiento sin valor de resultado","status":"PENDING","children":[]}]} . owner/delegate_to solo nicknames exactos del ROSTER. Todos status PENDING. No asumas ni incluyas valores de resultado; no pre-ejecutes ni afirmes que alguien ya respondió. Si no puedes usar la tool, devuelve SOLO el objeto JSON completo (sin markdown).`;
 
-      const runPromise = session.prompt(userMessage);
-      const watchdogPromise = new Promise<never>((_, reject) => {
-        watchdog = setInterval(() => {
-          const now = Date.now();
-          if (now - started >= hardMaxMs) {
-            timedOut = 'max';
-            reject(new Error(`planner_timeout_max_${hardMaxMs}ms`));
-          } else if (now - lastActivity >= idleTimeoutMs) {
-            timedOut = 'idle';
-            reject(new Error(`planner_timeout_idle_${idleTimeoutMs}ms`));
-          }
-        }, 1000);
-        (watchdog as any)?.unref?.();
-      });
+      const promptWithWatchdog = async (message: string) => {
+        lastActivity = Date.now();
+        const runPromise = session.prompt(message);
+        const watchdogPromise = new Promise<never>((_, reject) => {
+          watchdog = setInterval(() => {
+            const now = Date.now();
+            if (now - started >= hardMaxMs) {
+              timedOut = 'max';
+              reject(new Error(`planner_timeout_max_${hardMaxMs}ms`));
+            } else if (now - lastActivity >= idleTimeoutMs) {
+              timedOut = 'idle';
+              reject(new Error(`planner_timeout_idle_${idleTimeoutMs}ms`));
+            }
+          }, 1000);
+          (watchdog as any)?.unref?.();
+        });
+        try { await Promise.race([runPromise, watchdogPromise]); }
+        finally { if (watchdog) clearInterval(watchdog); watchdog = undefined; }
+      };
 
-      await Promise.race([runPromise, watchdogPromise]);
-
-      const extractAssistantText = (): { text: string; extraction: 'lastText' | 'messages' | 'tool_call' | 'none'; assistantMsgCount: number; messagesCount: number; lastAssistantContentTypes?: string[]; lastAssistantStopReason?: string | null; toolCallObj?: any } => {
+      const extractAssistantText = (afterMessageCount = 0): { text: string; extraction: 'lastText' | 'messages' | 'tool_call' | 'none'; assistantMsgCount: number; messagesCount: number; lastAssistantContentTypes?: string[]; lastAssistantStopReason?: string | null; toolCallObj?: any } => {
         let messagesCount = 0;
         let assistantMsgCount = 0;
         let lastAssistantContentTypes: string[] | undefined;
         let lastAssistantStopReason: string | null = null;
         let msgs: any[] = [];
-        try { msgs = typeof session.getMessages === 'function' ? (session.getMessages() || []) : []; } catch {}
+        try { msgs = typeof session.getMessages === 'function' ? (session.getMessages() || []).slice(afterMessageCount) : []; } catch {}
         messagesCount = msgs.length;
         for (let i = msgs.length - 1; i >= 0; i--) {
           const m: any = msgs[i];
@@ -483,28 +494,42 @@ export class DelegationPlannerService {
         return { text: '', extraction: 'none', assistantMsgCount, messagesCount, lastAssistantContentTypes, lastAssistantStopReason };
       };
 
-      const ex = extractAssistantText();
-      const out = ex.text;
+      const parseExtraction = (ex: ReturnType<typeof extractAssistantText>) => {
+        if (ex.extraction === 'tool_call' && ex.toolCallObj) return parsePlanV2(ex.toolCallObj, roster || [], String(input.plannerNickname || ''));
+        if (!ex.text.trim()) return { ok: false as const, reason: 'planner_empty_response', reason_detail: ex.assistantMsgCount === 0 ? 'no_assistant_message' : 'assistant_no_extractable_text' };
+        return parsePlan(ex.text, roster || [], String(input.plannerNickname || ''));
+      };
+      await promptWithWatchdog(userMessage);
+      let ex = extractAssistantText();
+      let parsed = parseExtraction(ex);
+      let repairAttempts = 0;
+      // If generation completed but its structure is recoverably invalid, ask once for a
+      // focused correction in the same session. Keep the original hard deadline for both tries.
+      if (!parsed.ok && !timedOut && Date.now() - started < hardMaxMs - 1000) {
+        repairAttempts++;
+        let priorMessageCount = 0;
+        try { priorMessageCount = (session.getMessages?.() || []).length; } catch {}
+        submittedPlan = null;
+        await promptWithWatchdog(`Corrige únicamente el plan anterior. Error de validación: ${(parsed as any).reason}. Devuelve un plan completo schema v2, preserva el objetivo y la cadena de delegación, usa owners/delegate_to solo del roster y deja cada hijo bajo el agente delegado por su padre. Puedes omitir id, deliver_to o stop: se completarán de forma segura. No expliques nada.`);
+        ex = extractAssistantText(priorMessageCount);
+        parsed = parseExtraction(ex);
+      }
+
       const plannerMs = Date.now() - started;
       const firstActivityMs = firstActivityAt ? firstActivityAt - started : null;
-      if (ex.extraction === 'tool_call' && ex.toolCallObj) {
-        const v2 = parsePlanV2(ex.toolCallObj, roster || []);
-        const dbgObj = JSON.stringify(ex.toolCallObj);
-        const debug = makeDebug({ plannerMs, extraction: 'tool_call', outLen: dbgObj.length, outPreviewHead: preview(dbgObj, 400), outPreviewTail: dbgObj.length > 200 ? preview(dbgObj.slice(-200), 200) : undefined, assistantMsgCount: ex.assistantMsgCount, messagesCount: ex.messagesCount, lastAssistantContentTypes: ex.lastAssistantContentTypes, lastAssistantStopReason: ex.lastAssistantStopReason, parsePath: 'tool_call', toolCallUsed: true });
-        if (!v2.ok) return { ok: false, reason: (v2 as any).reason, reason_detail: (v2 as any).reason, plannerMs, firstActivityMs, debug };
-        return { ok: true, schema: 'v2', nodes: (v2 as any).nodes, parada: (v2 as any).parada, plan: (v2 as any).plan, plannerMs, firstActivityMs, debug };
-      }
-      const baseDebug = { plannerMs, extraction: ex.extraction, outLen: String(out || '').length, outPreviewHead: out ? preview(out, 400) : undefined, outPreviewTail: out && out.length > 200 ? preview(out.slice(-200), 200) : undefined, assistantMsgCount: ex.assistantMsgCount, messagesCount: ex.messagesCount, lastAssistantContentTypes: ex.lastAssistantContentTypes, lastAssistantStopReason: ex.lastAssistantStopReason, toolCallUsed: false };
-      if (!out || !String(out).trim()) {
-        const reason_detail = ex.assistantMsgCount === 0 ? 'no_assistant_message' : (ex.extraction === 'none' ? 'assistant_no_extractable_text' : 'empty_text');
-        return { ok: false, reason: 'planner_empty_response', reason_detail, plannerMs, firstActivityMs, debug: makeDebug(baseDebug) };
-      }
-      const parsed = parsePlan(String(out), roster || []);
-      const debug = makeDebug({ ...baseDebug, repaired: (parsed as any).repaired, parsePath: (parsed as any).parsePath });
-      if (!parsed.ok) {
-        return { ok: false, reason: (parsed as any).reason, reason_detail: (parsed as any).reason_detail || (parsed as any).reason, plannerMs, firstActivityMs, debug };
-      }
-      return { ok: true, schema: 'v2', plan: (parsed as any).plan, nodes: (parsed as any).nodes, parada: (parsed as any).parada, plannerMs, firstActivityMs, debug };
+      const out = ex.text;
+      const debugBase = ex.extraction === 'tool_call' && ex.toolCallObj
+        ? JSON.stringify(ex.toolCallObj)
+        : String(out || '');
+      const debug = makeDebug({ plannerMs, extraction: ex.extraction, outLen: debugBase.length,
+        outPreviewHead: debugBase ? preview(debugBase, 400) : undefined,
+        outPreviewTail: debugBase.length > 200 ? preview(debugBase.slice(-200), 200) : undefined,
+        assistantMsgCount: ex.assistantMsgCount, messagesCount: ex.messagesCount,
+        lastAssistantContentTypes: ex.lastAssistantContentTypes, lastAssistantStopReason: ex.lastAssistantStopReason,
+        repaired: (parsed as any).repaired, parsePath: ex.extraction === 'tool_call' ? 'tool_call' : (parsed as any).parsePath,
+        toolCallUsed: ex.extraction === 'tool_call' });
+      if (!parsed.ok) return { ok: false, reason: (parsed as any).reason || 'invalid_plan', reason_detail: (parsed as any).reason_detail || (parsed as any).reason, plannerMs, firstActivityMs, debug: { ...debug, repairAttempts } };
+      return { ok: true, schema: 'v2', plan: parsed.plan, nodes: parsed.nodes, parada: parsed.parada, plannerMs, firstActivityMs, debug: { ...debug, repairAttempts } };
     } catch (e: any) {
       try { if (session?.abort) await session.abort().catch?.(() => {}); } catch {}
       const plannerMs = Date.now() - started;

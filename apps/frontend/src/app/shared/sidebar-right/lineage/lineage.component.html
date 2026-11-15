@@ -1,0 +1,50 @@
+<div class="lineage-pane">
+  <div class="header lineage-header">
+    <h2>Task Lineage</h2>
+    <div class="head-actions"><span class="count">{{ nodes.length }}</span><button pButton icon="pi pi-trash" severity="danger" [text]="true" class="p-button-sm" title="Limpiar Task Lineage" (click)="clearLineage()"></button></div>
+  </div>
+  <div class="legend" *ngIf="agents.length">
+    <span class="leg" *ngFor="let a of agents"><i [style.background]="agentColor(a.id)"></i>{{a.nickname}}</span>
+    <span class="leg key"><i class="line solid"></i>resuelto</span>
+    <span class="leg key"><i class="line dashed"></i>en curso/pendiente</span>
+    <span class="leg key"><i class="line resolved-progress"></i>progreso reportado + resuelto</span>
+  </div>
+  <div class="timeline">
+    <svg class="graph" *ngIf="edges.length" [attr.width]="graphW" [attr.height]="graphH">
+      <path *ngFor="let e of edges; trackBy: trackEdge"
+            [attr.d]="e.d"
+            [attr.stroke]="e.color"
+            fill="none"
+            stroke-width="2.4"
+            stroke-linecap="round"
+            [class.edge-path]="true"
+            [class.dashed]="e.dashed"
+            [class.solid]="!e.dashed"
+            [class.spine]="e.kind==='spine'"
+            [class.active-flow]="e.dashed"
+            [style.color]="e.color"/>
+      <circle class="node" *ngFor="let n of nodes; let i = index" [attr.cx]="cx(n)" [attr.cy]="cy[i]||0" r="5.5" [attr.fill]="n.color" [attr.stroke]="'var(--bg-secondary,#111827)'" stroke-width="1.5" [class.active-node]="(n.isProgress && !isResolvedProgress(n.id!)) || n.status==='PROCESSING' || n.status==='PENDING'" [style.color]="n.color">
+        <title>{{ nodeTitle(n) }}</title>
+      </circle>
+    </svg>
+    <div class="rows" [style.padding-left.px]="graphW">
+      @for (n of nodes; track n.id; let i = $index) {
+        <div #row class="task-timeline-item" [class.completed]="n.status==='COMPLETED'" [class.hold]="n.status==='HOLD'||n.status==='STOPPED'" [class.processing]="n.status==='PROCESSING'">
+          <div class="task-header">
+            <span class="flow" [class.out]="n.isReturn" [style.color]="n.color">{{ n.isReturn ? '↩' : '↳' }}</span>
+            <span class="task-id">#{{ n.id }}</span>
+            <span class="depth">d{{ n.depth }}</span>
+            <span class="ftag" *ngIf="n.isProgress">progress</span>
+            <span class="ftag final" *ngIf="n.isFinal">final</span>
+            <p-tag [value]="n.status" [severity]="severity(n.status)"></p-tag>
+          </div>
+          <div class="task-route"><span [style.color]="agentColor(n.sender_agent_id)">{{ label(n.sender_agent_id) }}</span> → <span [style.color]="agentColor(n.receiver_agent_id)">{{ label(n.receiver_agent_id) }}</span></div>
+          @if (n.parent_task_id) { <div class="parent">parent: #{{ n.parent_task_id }} · {{ n.task_flow || 'direct' }}<ng-container *ngIf="n.isProgress && !isResolvedProgress(n.id!)"> (en curso)</ng-container><ng-container *ngIf="n.isFinal"> (resuelto)</ng-container></div> }
+          <div class="payload" [title]="fullText(n)">{{ preview(n.payload) }}</div>
+        </div>
+      } @empty {
+        <div class="empty">No tasks yet</div>
+      }
+    </div>
+  </div>
+</div>

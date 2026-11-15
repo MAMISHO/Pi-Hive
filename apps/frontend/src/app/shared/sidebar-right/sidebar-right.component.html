@@ -1,0 +1,20 @@
+<div class="sidebar-right">
+  <div class="tabs">
+    <button type="button" class="tab" [class.active]="activeTab==='lineage'" (click)="setTab('lineage')">Task Lineage <span class="tcount">{{ tasks.length }}</span></button>
+    <button type="button" class="tab" [class.active]="activeTab==='usage'" (click)="setTab('usage')">Consumo <span class="tcount" *ngIf="usageRuns.length">{{ usageRuns.length }}</span></button>
+  </div>
+
+  @if (activeTab === 'lineage') {
+    <app-lineage
+      [tasks]="tasks"
+      [agents]="agents"
+      (clearRequested)="clearLineage()">
+    </app-lineage>
+  } @else {
+    <app-usage
+      [usageRuns]="usageRuns"
+      [usageTotals]="usageTotals"
+      [agents]="agents">
+    </app-usage>
+  }
+</div>

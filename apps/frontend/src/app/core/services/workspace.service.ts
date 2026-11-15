@@ -4,7 +4,7 @@ import { BehaviorSubject, Observable, tap } from 'rxjs';
 
 export interface IWorkspace {
   id: string; name: string; path: string; is_active: boolean;
-  active_system_prompt_id?: string | null; custom_chief_prompt?: string | null; workspace_prompt?: string | null; hitl_enabled?: boolean;
+  active_system_prompt_id?: string | null; custom_chief_prompt?: string | null; workspace_prompt?: string | null; role_bindings?: string | null; hitl_enabled?: boolean;
   created_at?: string | null;
 }
 const BASE_URL = 'http://localhost:8090';

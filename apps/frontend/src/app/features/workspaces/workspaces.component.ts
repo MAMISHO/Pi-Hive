@@ -126,6 +126,11 @@ import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-
       <div class="step"><strong>2) Prompt del workspace</strong></div>
       <div class="path">Instrucciones adicionales propias de este workspace. Se añaden al contexto del sistema (no reemplazan la gobernanza/delegación general). El system prompt base se elige al abrir el workspace.</div>
       <textarea [(ngModel)]="wsPrompt" rows="5" placeholder="Escribe aquí el prompt/instrucciones para este workspace (opcional)"></textarea>
+      @if (editWs) {
+        <label>Bindings de roles (JSON roleKey → agentId)
+          <textarea [(ngModel)]="roleBindings" rows="4" placeholder='{"orchestration":"agent-id","harness_engineering":"agent-id","ux_ui":"agent-id"}'></textarea>
+        </label>
+      }
 
       @if (!editWs) {
         <div class="step"><strong>3) Chief (requerido)</strong></div>
@@ -201,7 +206,7 @@ export class WorkspacesComponent implements OnInit {
   workspaces: IWorkspace[] = [];
   wizardOpen=false; editWs: IWorkspace|null=null; saving=false; error='';
   newPath=''; browseVisible=false; browseCurrent=''; browseParent:string|null=null; browseDirs:any[]=[];
-  wsName=''; wsPrompt='';
+  wsName=''; wsPrompt=''; roleBindings='';
   chiefNickname=''; modelProviders: Array<{provider:string;models:string[]}>=[]; selectedProvider=''; selectedModelId=''; chiefModel=''; chiefColor=this.randColor(); chiefInstruction=''; useCustomChiefPrompt=false; customChiefPrompt=''; hitlEnabled=false;
   // config modal
   configOpen=false; piAgentDir=''; appSettingsDefaults: {piAgentDir?: string} = {}; appSettingsEffective: {piAgentDir?: string} = {}; savingSettings=false; settingsMsg=''; settingsErr='';
@@ -265,8 +270,8 @@ export class WorkspacesComponent implements OnInit {
 
   async deleteWorkspace(w:IWorkspace){ const ok = await this.feedback.confirm({ title: 'Eliminar workspace', message: `Eliminar workspace "${w.name}" (${w.path})?\nEsto eliminará sus agentes y tareas.`, confirmLabel: 'Eliminar', danger: true }); if(!ok) return; this.ws.delete(w.id).subscribe({ next: ()=>{ this.feedback.success(`Workspace "${w.name}" eliminado.`); this.load(); }, error: ()=> this.feedback.error('No se pudo eliminar el workspace.') }); }
   openCreate(){ this.editWs=null; this.resetWizard(); this.wizardOpen=true; this.chiefNickname='Chief-'+Math.random().toString(36).slice(2,5); this.chiefColor=this.randColor(); }
-  openEdit(w:IWorkspace){ this.editWs=w; this.resetWizard(); this.wizardOpen=true; this.wsName=w.name; this.hitlEnabled=!!w.hitl_enabled; this.wsPrompt = (w as any).workspace_prompt || ''; }
-  resetWizard(){ this.error=''; this.saving=false; this.newPath=''; this.browseVisible=false; this.wsName=''; this.wsPrompt=''; this.chiefNickname=''; this.selectedProvider=''; this.selectedModelId=''; this.chiefModel=''; this.chiefInstruction=''; this.useCustomChiefPrompt=false; this.customChiefPrompt=''; this.hitlEnabled=false; }
+  openEdit(w:IWorkspace){ this.editWs=w; this.resetWizard(); this.wizardOpen=true; this.wsName=w.name; this.hitlEnabled=!!w.hitl_enabled; this.wsPrompt = (w as any).workspace_prompt || ''; this.roleBindings = (w as any).role_bindings || ''; }
+  resetWizard(){ this.error=''; this.saving=false; this.newPath=''; this.browseVisible=false; this.wsName=''; this.wsPrompt=''; this.roleBindings=''; this.chiefNickname=''; this.chiefColor=''; this.selectedProvider=''; this.selectedModelId=''; this.chiefModel=''; this.chiefInstruction=''; this.useCustomChiefPrompt=false; this.customChiefPrompt=''; this.hitlEnabled=false; }
   browse(p:string){ this.browseVisible=true; this.ws.browseDirs(p||undefined).subscribe(r=>{ this.browseCurrent=r.current; this.browseParent=r.parent; this.browseDirs=r.dirs||[]; if(r.error) this.error=r.error; }); }
   useFolder(){ this.newPath=this.browseCurrent; this.browseVisible=false; this.wsName=this.newPath.split('/').filter(Boolean).pop()||'workspace'; }
   currentModels(): string[] { const p=this.modelProviders.find(x=>x.provider===this.selectedProvider); return p?p.models:[]; }
@@ -276,7 +281,7 @@ export class WorkspacesComponent implements OnInit {
     this.error='';
     if(this.editWs){
       this.saving=true;
-      this.ws.update(this.editWs.id,{name:this.wsName||this.editWs.name, hitl_enabled:this.hitlEnabled, workspace_prompt: (this.wsPrompt||'').trim() || null} as any).subscribe({next:()=>{this.wizardOpen=false; this.saving=false; this.load(); this.ws.refreshActive();}, error:(e)=>{this.error=e?.error?.message||'Error'; this.saving=false;}});
+      this.ws.update(this.editWs.id,{name:this.wsName||this.editWs.name, hitl_enabled:this.hitlEnabled, workspace_prompt: (this.wsPrompt||'').trim() || null, role_bindings: (this.roleBindings||'').trim() || null} as any).subscribe({next:()=>{this.wizardOpen=false; this.saving=false; this.load(); this.ws.refreshActive();}, error:(e)=>{this.error=e?.error?.message||'Error'; this.saving=false;}});
       return;
     }
     if(!this.newPath.trim()) { this.error='La carpeta es obligatoria'; return; }

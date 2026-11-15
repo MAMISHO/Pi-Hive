@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query } from '@nestjs/common';
+import { Controller, Get, Param, Put, Query } from '@nestjs/common';
 import { RunTraceService } from './run-trace.service.js';
 
 @Controller('api/traces')
@@ -33,5 +33,11 @@ export class RunTraceController {
   @Get('usage/workspace/:workspaceId')
   async workspaceUsage(@Param('workspaceId') workspaceId: string) {
     return this.trace.getWorkspaceUsage(workspaceId);
+  }
+
+  @Put('usage/workspace/:workspaceId/reset')
+  async resetWorkspaceUsage(@Param('workspaceId') workspaceId: string) {
+    const deleted = await this.trace.clearWorkspaceUsage(workspaceId);
+    return { ok: true, deleted };
   }
 }

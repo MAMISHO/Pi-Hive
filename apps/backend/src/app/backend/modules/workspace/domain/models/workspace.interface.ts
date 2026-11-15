@@ -6,6 +6,7 @@ export interface IWorkspace {
   active_system_prompt_id: string | null;
   custom_chief_prompt: string | null;
   workspace_prompt: string | null;
+  role_bindings?: string | null;
   hitl_enabled: boolean;
   created_at: Date | string | null;
 }

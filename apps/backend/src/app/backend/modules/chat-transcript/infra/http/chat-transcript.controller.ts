@@ -14,11 +14,13 @@ export class ChatTranscriptController {
     @Query('before') before?: string,
     @Query('limit') limit?: string,
     @Query('mode') mode?: string,
+    @Query('requestId') requestId?: string,
   ) {
     const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
     const light = mode !== 'full';
     const where: any = { agent_id: agentId };
     if (before) where.id = { [Op.lt]: Number(before) };
+    if (requestId) where.request_id = requestId;
 
     // Overfetch then build a compact window: for completed turns collapse intermediates
     // into a single placeholder group so request/response dominate the budget.
@@ -146,4 +148,53 @@ export class ChatTranscriptController {
     });
     return rows.map((r) => r.toJSON());
   }
+
+  // Full traversal for a request across agents: events linked to request_id plus
+  // delegated child requests (request_parent_id chain) for scoped/auditable tracing.
+  @Get('request/:requestId/trace')
+  async getRequestTrace(@Param('requestId') requestId: string) {
+    const collected: any[] = [];
+    const seenIds = new Set<number>();
+    const queue: string[] = [requestId];
+    const seenReq = new Set<string>();
+
+    while (queue.length) {
+      const rid = queue.shift()!;
+      if (!rid || seenReq.has(rid)) continue;
+      seenReq.add(rid);
+
+      const rows = await AgentChatEventEntity.findAll({
+        where: { request_id: rid } as any,
+        order: [['id', 'ASC']],
+        limit: 2000,
+      });
+      for (const r of rows) {
+        const ev: any = r.toJSON();
+        if (!seenIds.has(ev.id)) {
+          seenIds.add(ev.id);
+          collected.push(ev);
+        }
+      }
+
+      // discover delegated child requests spawned from this request
+      const children = await AgentChatEventEntity.findAll({
+        where: { request_parent_id: rid, kind: 'request' } as any,
+        attributes: ['request_id'],
+        limit: 500,
+      });
+      for (const c of children) {
+        const childRid = (c as any).request_id || (c as any).get?.('request_id');
+        if (childRid && !seenReq.has(childRid)) queue.push(childRid);
+      }
+    }
+
+    collected.sort((a, b) => {
+      const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+      if (ta !== tb) return ta - tb;
+      return (Number(a.id) || 0) - (Number(b.id) || 0);
+    });
+    return { root_request_id: requestId, request_ids: Array.from(seenReq), events: collected };
+  }
+
 }
