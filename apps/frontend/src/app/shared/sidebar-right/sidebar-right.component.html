@@ -5,6 +5,18 @@
   </div>
 
   @if (activeTab === 'lineage') {
+    <div class="memory-strip" *ngIf="agents?.length">
+      <div class="memory-strip-title">Memoria por agente</div>
+      <div class="memory-strip-list">
+        @for (a of agents; track a.id) {
+          <div class="mem-agent" [title]="a.nickname || a.name">
+            <span class="dot" [style.background]="a.color || 'var(--accent-blue)'"></span>
+            <span class="aname">{{ a.nickname || a.name }}</span>
+            <span class="pill" [class.on]="a.memoryEffective" [class.off]="!a.memoryEffective">{{ a.memoryPreference || a.memory_enabled ? (a.memoryEffective ? 'efectiva' : 'pref.') : 'off' }}</span>
+          </div>
+        }
+      </div>
+    </div>
     <app-lineage
       [tasks]="tasks"
       [agents]="agents"

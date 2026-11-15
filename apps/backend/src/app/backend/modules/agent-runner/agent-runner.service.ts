@@ -1,4 +1,4 @@
-import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, OnModuleInit, Optional } from '@nestjs/common';
 import { Type } from '@sinclair/typebox';
 import { createAgentSession, defineTool, SessionManager, DefaultResourceLoader, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
@@ -19,10 +19,11 @@ import { RunTraceService } from './run-trace.service.js';
 import { DelegationPlannerService } from './delegation-planner.service.js';
 import { DelegationPlanStore } from './delegation-plan.store.js';
 import { AppSettingsService } from '../app-settings/app-settings.service.js';
+import { NexoPalaceMemoryService } from '../memory-mcp/nexo-palace-memory.service.js';
 import { buildReceiverScopedInstruction } from './delegation-instruction.js';
 import { detectCopyPasteInstruction } from './delegation-instruction-guard.js';
 import { explicitlyRequestsAgent } from './delegation-plan-validation.js';
-import { allowedToolsForTaskFlow, buildPlannerRoster, explicitRecipientFromRequest, formatDelegationProgressSummary, selectCallbackInstruction } from './delegation-runtime-policy.js';
+import { allowedToolsForTaskFlow, buildPlannerRoster, canPlanDelegation, explicitRecipientFromRequest, formatDelegationProgressSummary, selectCallbackInstruction } from './delegation-runtime-policy.js';
 import { taskEventEmitter } from '../task-queue/infra/persistence/sequalize/entities/task-queue.schema.js';
 import { AgentStatus } from '../agent/domain/models/agent-status.enum.js';
 import { AgentSessionHistoryEntity } from '../session-history/infra/persistence/sequalize/entities/agent-session-history.schema.js';
@@ -52,6 +53,7 @@ export class AgentRunnerService implements OnModuleInit {
     @Inject(DelegationPlannerService) private delegationPlanner: DelegationPlannerService,
     @Inject(DelegationPlanStore) private planStore: DelegationPlanStore,
     private readonly appSettings: AppSettingsService,
+    @Optional() @Inject(NexoPalaceMemoryService) private readonly memoryService?: NexoPalaceMemoryService,
   ) {
     console.log('[AgentRunner] constructed');
   }
@@ -305,7 +307,7 @@ export class AgentRunnerService implements OnModuleInit {
     this.emitQueueState(agent.id, workspaceId);
 
     const groupId = `task-${task.id}`;
-    await this.saveChatEvent(workspaceId, agent.id, task, 'INBOUND', 'request', task.payload, groupId).catch(() => {});
+    let currentRequestEventId: number | null = await this.saveChatEvent(workspaceId, agent.id, task, 'INBOUND', 'request', task.payload, groupId).catch(() => null);
 
     let stopped = false;
     let runId = randomUUID();
@@ -318,7 +320,7 @@ export class AgentRunnerService implements OnModuleInit {
         (task as any).response = response;
         task.status = 'COMPLETED' as any;
         await this.taskQueueRepository.update(task);
-        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', response, groupId).catch(() => {});
+        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', response, groupId, { currentRequestEventId }).catch(() => {});
         agent.status = AgentStatus.IDLE;
         await this.agentRepository.update(agent);
         this.currentTaskByAgent.delete(agent.id);
@@ -345,7 +347,7 @@ export class AgentRunnerService implements OnModuleInit {
         task.status = 'HOLD' as any;
         (task as any).response = `⚠️ Modelo no resuelto: ${r.reason}. Configura task_state.model (provider/modelId), p.ej. ollama/ornith-1.5:9b-16k-pi.`;
         await this.taskQueueRepository.update(task);
-        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', (task as any).response, groupId).catch(() => {});
+        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', (task as any).response, groupId, { currentRequestEventId }).catch(() => {});
         this.trace.modelNotFound(runId, agent.id, workspaceId, task.id, r.reason).catch(() => {});
         this.trace.close(runId, agent.id, workspaceId, task.id, 'model_not_found', r.reason, Date.now() - startedAt, false).catch(() => {});
         agent.status = AgentStatus.IDLE;
@@ -591,6 +593,7 @@ export class AgentRunnerService implements OnModuleInit {
             parent_task_callback: false,
             callback_context: task.payload, // original instruction so the delegator can resume
             plan_ref: effectivePlanRef,
+            origin_request_event_id: currentRequestEventId,
             created_at: new Date(),
           } as any);
           delegatedThisRun = true;
@@ -687,8 +690,7 @@ export class AgentRunnerService implements OnModuleInit {
               agent_id: agent.id,
               task_id: Number(currentTaskId),
               parent_task_id: task.parent_task_id ?? null,
-              request_id: `req:${Number(currentTaskId)}`,
-              request_parent_id: null,
+              request_id: currentRequestEventId,
               direction: 'OUTBOUND',
               kind: 'plan',
               content: planText,
@@ -792,7 +794,17 @@ export class AgentRunnerService implements OnModuleInit {
       const activePlanBlock = activePlan
         ? (activePlan.schema === 'v2' ? planStore.formatForAgent(activePlan, agent.nickname, Number((task as any).depth ?? 0)) : planStore.formatForPrompt(activePlan))
         : null;
-      const systemPrompt = await this.promptBuilder.buildSystem({ agent, team: availableAgents });
+      const terminalWorkerResult = agent.role !== 'CHIEF' && isDelegationResult
+        && (callbackFinalFlag === true || callbackFinalFlag === 1 || callbackFinalFlag === '1')
+        && !!activePlan && activePlan.state !== 'active';
+      const memoryWorkspace = await this.workspaceRepository.get(workspaceId);
+      const memoryState = this.memoryService ? await this.memoryService.isMemoryEffective(agent, memoryWorkspace as any) : null;
+      const memoryEffective = !!memoryState?.effective && !terminalWorkerResult;
+      if (memoryState) {
+        this.trace.record({ runId, agentId: agent.id, eventType: 'memory_state', taskId: task.id, workspaceId,
+          eventData: { effective: memoryState.effective, reason: memoryState.reason, globalEnabled: memoryState.globalEnabled, configured: memoryState.configured, available: memoryState.available, workspaceEnabled: memoryState.workspaceEnabled, agentEnabled: memoryState.agentEnabled } }).catch(() => {});
+      }
+      const systemPrompt = await this.promptBuilder.buildSystem({ agent, team: availableAgents, memoryEffective });
       const systemPromptHash = createHash('sha1').update(String(systemPrompt || '')).digest('hex');
       const hasInjectedContext = !!String(systemPrompt || '').trim();
       // Skip reapplying/persisting an unchanged system prompt on resumed sessions (Pi session already has context).
@@ -855,13 +867,13 @@ export class AgentRunnerService implements OnModuleInit {
         if (hasInjectedContext) {
           // systemPrompt already includes agent additional_instruction (PromptBuilder.buildSystem); do not append it again.
           const ctx = `[SYSTEM CONTEXT · injected by Pi-Hive]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${workspaceId}).\n\n${systemPrompt}`;
-          await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'system_prompt', ctx, `system-${agent.id}-${Date.now()}`).catch(() => {});
+          await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'system_prompt', ctx, `system-${agent.id}-${Date.now()}`, { currentRequestEventId }).catch(() => {});
         }
         this.systemPromptInjected.add(agent.id);
       } else if (!isResumed && !isDelegationCallback) {
         // first task of new session but injection marker missing in-memory (e.g. after restart) - re-inject visibly once
         if (hasInjectedContext) {
-          await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'system_prompt', `[SYSTEM CONTEXT · injected by Pi-Hive]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${workspaceId}).\n\n${systemPrompt}`, `system-${agent.id}-${Date.now()}`).catch(() => {});
+          await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'system_prompt', `[SYSTEM CONTEXT · injected by Pi-Hive]\nEres ${agent.nickname} (id=${agent.id}, rol=${agent.role}, workspace=${workspaceId}).\n\n${systemPrompt}`, `system-${agent.id}-${Date.now()}`, { currentRequestEventId }).catch(() => {});
         }
         this.systemPromptInjected.add(agent.id);
       }
@@ -870,15 +882,30 @@ export class AgentRunnerService implements OnModuleInit {
       let resourceLoader: any = undefined;
       let agentDir = '';
       try { agentDir = await this.appSettings.resolvePiAgentDir(); } catch { agentDir = path.join(process.cwd(), 'data', 'pi-agent'); }
-      try { resourceLoader = new (DefaultResourceLoader as any)({ cwd, agentDir, systemPrompt }); } catch (e) { console.warn('[AgentRunner] DefaultResourceLoader unavailable, using prompt injection', e); }
+      try {
+        const memoryMcpOptions = this.memoryService
+          ? await this.memoryService.resourceLoaderOptions(memoryEffective && !terminalWorkerResult)
+          : {};
+        resourceLoader = new (DefaultResourceLoader as any)({ cwd, agentDir, systemPrompt, ...memoryMcpOptions });
+      } catch (e) {
+        console.warn('[AgentRunner] Pi MCP resource loader failed; disabling MCP for this session to preserve memory preferences.', e);
+        try {
+          resourceLoader = new (DefaultResourceLoader as any)({ cwd, agentDir, systemPrompt, disabledBuiltinExtensions: ['mcp'] });
+        } catch (fallbackError) {
+          console.warn('[AgentRunner] DefaultResourceLoader unavailable; using prompt injection', fallbackError);
+        }
+      }
       console.log(`[AgentRunner] prompt built (sys=${systemPrompt.length}, task=${promptText.length}), creating AgentSession model=${resolved.raw}...`);
       // Progress cannot plan; an active plan already defines the route. A RESULT without a
       // plan may need to start a new multi-agent subchain, for any role, so retain the planner.
-      const planningAllowed = !isProgressFlowForTools && activePlan?.state !== 'active' && !explicitChiefRecipient;
-      const sessionTools = allowedToolsForTaskFlow((task as any).task_flow, agent.role, planningAllowed);
-      const customTools = [delegateTaskTool, ...(sessionTools.includes('plan_delegation') ? [planDelegationTool] : [])];
+      const planningAllowed = canPlanDelegation({ flow: flowForTools, planState: activePlan?.state, explicitlyAddressedRecipient: !!explicitChiefRecipient });
+      const sessionTools = allowedToolsForTaskFlow(flowForTools, agent.role, planningAllowed, terminalWorkerResult);
+      const customTools = [
+        ...(sessionTools.includes('delegate_task') ? [delegateTaskTool] : []),
+        ...(sessionTools.includes('plan_delegation') ? [planDelegationTool] : []),
+      ];
       this.trace.record({ runId, agentId: agent.id, eventType: 'session_tools_configured', taskId: task.id, workspaceId,
-        eventData: { taskFlow: (task as any).task_flow || 'direct', role: agent.role, tools: sessionTools, customTools: customTools.map((tool: any) => tool.name), planningAllowed, activePlan: activePlan?.state === 'active' } }).catch(() => {});
+        eventData: { taskFlow: flowForTools, role: agent.role, tools: sessionTools, customTools: customTools.map((tool: any) => tool.name), planningAllowed, activePlanState: activePlan?.state ?? null, terminalWorkerResult, memoryEffective } }).catch(() => {});
       const sessionOpts: any = { sessionManager, cwd, tools: sessionTools,
         customTools,
         modelRuntime: resolved.runtime, model: resolved.model };
@@ -946,7 +973,7 @@ export class AgentRunnerService implements OnModuleInit {
         thinkPhase += 1;
         const summary = t.replace(/\s+/g, ' ').trim().slice(0, 80);
         const payload = JSON.stringify({ summary, text: t, phase: thinkPhase });
-        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'thinking', payload, groupId).catch(() => {});
+        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'thinking', payload, groupId, { currentRequestEventId }).catch(() => {});
       };
 
       const toResultSummary = (v: any): string => {
@@ -965,7 +992,7 @@ export class AgentRunnerService implements OnModuleInit {
       const saveToolEvent = async (phase: 'start'|'call'|'end'|'error', info: { toolName?: string; toolCallId?: string; args?: any; resultSummary?: any; isError?: boolean }) => {
         toolSeq += 1;
         const payload = JSON.stringify({ ...info, phase, order: toolSeq });
-        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'tool_call', payload, groupId).catch(() => {});
+        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'tool_call', payload, groupId, { currentRequestEventId }).catch(() => {});
       };
 
       const pickAssistantMeta = (ev: any) => {
@@ -973,7 +1000,19 @@ export class AgentRunnerService implements OnModuleInit {
         for (let i = msgs.length - 1; i >= 0; i--) { const m = msgs[i]; if (m?.role === 'assistant') { if (m.stopReason) lastStopReason = m.stopReason; if (m.errorMessage) lastErrorMessage = m.errorMessage; } }
       };
 
+      let memoryRuntimeChecked = false;
       const unsubscribe = session.subscribe((event: any) => {
+        // Pi waits for direct MCP tools in before_agent_start. Inspect after that wait, at agent_start,
+        // instead of mistaking the initial background connection window for a failure.
+        if (!memoryRuntimeChecked && memoryEffective && this.memoryService && event.type === 'agent_start') {
+          memoryRuntimeChecked = true;
+          const toolNames = typeof session?.getAllTools === 'function'
+            ? session.getAllTools().map((tool: any) => String(tool?.name || ''))
+            : [];
+          const memoryRuntime = this.memoryService.recordPiSessionMemoryTools(toolNames);
+          this.trace.record({ runId, agentId: agent.id, eventType: 'memory_pi_session', taskId: task.id, workspaceId,
+            eventData: { available: memoryRuntime.available, reason: memoryRuntime.reason, toolNames: toolNames.filter((name: string) => /^mcp__.*__(memory_query|memory_trace)$/.test(name)) } }).catch(() => {});
+        }
         if (event.type === 'message_end' && event.message?.role === 'assistant' && event.message?.usage) {
           accumulateUsage(event.message.usage);
         }
@@ -1061,7 +1100,7 @@ export class AgentRunnerService implements OnModuleInit {
           task.status = 'HOLD' as any;
           (task as any).response = message;
           await this.taskQueueRepository.update(task);
-          await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', message, groupId).catch(() => {});
+          await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', message, groupId, { currentRequestEventId }).catch(() => {});
           recordRunUsage('delegation_tool_loop_stopped');
           this.trace.close(runId, agent.id, workspaceId, task.id, 'delegation_tool_loop_stopped', lastStopReason || undefined, durationMs, false).catch(() => {});
           return;
@@ -1074,7 +1113,7 @@ export class AgentRunnerService implements OnModuleInit {
             freshStop.status = 'STOPPED' as any;
             (freshStop as any).response = stopMsg;
             await this.taskQueueRepository.update(freshStop);
-            try { await this.saveChatEvent(workspaceId, agent.id, freshStop, 'OUTBOUND', 'response', stopMsg, groupId); } catch {}
+            try { await this.saveChatEvent(workspaceId, agent.id, freshStop, 'OUTBOUND', 'response', stopMsg, groupId, { currentRequestEventId }); } catch {}
           }
           recordRunUsage('stopped');
           this.trace.close(runId, agent.id, workspaceId, task.id, 'stopped', lastStopReason || 'user_stop', durationMs, false).catch(() => {});
@@ -1087,7 +1126,7 @@ export class AgentRunnerService implements OnModuleInit {
           task.status = 'HOLD' as any;
           (task as any).response = `⚠️ Error de ejecución: ${String(finalErr).slice(0, 600)}`;
           await this.taskQueueRepository.update(task);
-          await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', (task as any).response, groupId).catch(() => {});
+          await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', (task as any).response, groupId, { currentRequestEventId }).catch(() => {});
           recordRunUsage('error');
           this.trace.error(runId, agent.id, workspaceId, task.id, 'prompt_failed', String(finalErr)).catch(() => {});
           this.trace.close(runId, agent.id, workspaceId, task.id, 'error', lastStopReason || undefined, durationMs, false).catch(() => {});
@@ -1104,7 +1143,7 @@ export class AgentRunnerService implements OnModuleInit {
           task.status = 'HOLD' as any;
           (task as any).response = msg;
           await this.taskQueueRepository.update(task);
-          await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', msg, groupId).catch(() => {});
+          await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', msg, groupId, { currentRequestEventId }).catch(() => {});
           recordRunUsage('output_length_no_action');
           this.trace.error(runId, agent.id, workspaceId, task.id, 'output_length_exhausted_no_action', JSON.stringify({ stopReason: lastStopReason, delegatedThisRun, toolCallsTotal, nudged: retryNudged })).catch(() => {});
           this.trace.close(runId, agent.id, workspaceId, task.id, 'output_length_no_action', lastStopReason || undefined, durationMs, false).catch(() => {});
@@ -1120,7 +1159,7 @@ export class AgentRunnerService implements OnModuleInit {
         if (!text && !delegatedThisRun) console.warn(`[AgentRunner] empty response task=${task.id} run=${runId} model=${resolved.raw} stopReason=${lastStopReason}`);
         const summaryText = responseText.slice(0, 500);
         await this.agentMemoryRepository.add({ agent_id: agent.id, session_id: String(sessionFile || ''), compacted_summary: summaryText, created_at: new Date() } as any);
-        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', responseText, groupId).catch(() => {});
+        await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'response', responseText, groupId, { currentRequestEventId }).catch(() => {});
         agent.current_session_id = sessionFile ? String(sessionFile) : agent.current_session_id;
         task.status = 'COMPLETED' as any;
         (task as any).response = responseText;
@@ -1220,6 +1259,7 @@ export class AgentRunnerService implements OnModuleInit {
                     callback_final: true,
                     callback_context: selectCallbackInstruction(origin, task),
                     plan_ref: cbPlanRef,
+                    origin_request_event_id: currentRequestEventId,
                     created_at: new Date(),
                   } as any);
                   this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_final_enqueued', taskId: task.id, workspaceId, eventData: { to: targetSender, depth: originDepth, originTaskId: origin?.id ?? null, plan_ref: cbPlanRef } }).catch(() => {});
@@ -1247,6 +1287,7 @@ export class AgentRunnerService implements OnModuleInit {
                     callback_final: false,
                     callback_context: selectCallbackInstruction(origin, task),
                     plan_ref: cbPlanRef,
+                    origin_request_event_id: currentRequestEventId,
                     created_at: new Date(),
                   } as any);
                   this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_progress_enqueued', taskId: task.id, workspaceId, eventData: { to: targetSender, depth: originDepth, plan_ref: cbPlanRef } }).catch(() => {});
@@ -1274,6 +1315,7 @@ export class AgentRunnerService implements OnModuleInit {
                   callback_final: true,
                   callback_context: (task as any).callback_context ?? task.payload,
                   plan_ref: cbPlanRef,
+                  origin_request_event_id: currentRequestEventId,
                   created_at: new Date(),
                 } as any);
                 this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_result_final_enqueued', taskId: task.id, workspaceId, eventData: { to: task.sender_agent_id, depth: cbDepth, plan_ref: cbPlanRef } }).catch(() => {});
@@ -1297,6 +1339,7 @@ export class AgentRunnerService implements OnModuleInit {
                   callback_final: false,
                   callback_context: (task as any).callback_context ?? task.payload,
                   plan_ref: cbPlanRef,
+                  origin_request_event_id: currentRequestEventId,
                   created_at: new Date(),
                 } as any);
                 this.trace.record({ runId, agentId: agent.id, eventType: 'delegation_progress_enqueued', taskId: task.id, workspaceId, eventData: { to: task.sender_agent_id, depth: cbDepth, plan_ref: cbPlanRef } }).catch(() => {});
@@ -1396,35 +1439,45 @@ export class AgentRunnerService implements OnModuleInit {
     }
   }
 
-  private resolveChatRequestLink(task: ITaskQueue, kind: string): { requestId: string | null; requestParentId: string | null } {
-    const reqId = task?.id != null ? `req:${task.id}` : null;
-    const parentReqId = task?.parent_task_id != null ? `req:${task.parent_task_id}` : null;
-    if (kind === 'request' || kind === 'response') {
-      // requests: own request_id (+ parent request that triggered this delegated/callback request)
-      // responses: identified by the request they answer
-      return { requestId: reqId, requestParentId: kind === 'request' ? parentReqId : null };
-    }
-    // intermediate/system/plan events: associate to current request for traversal filtering
-    return { requestId: reqId, requestParentId: null };
-  }
-
-  private async saveChatEvent(workspaceId: string, agentId: string, task: ITaskQueue, direction: 'INBOUND' | 'OUTBOUND', kind: string, content: string, groupId: string) {
+  // Self-referencing request tracing:
+  // - kind='request': creates the request node; request_id points to the originating request event (origin_request_event_id), null for roots.
+  //   Returns the created event id so it becomes the parent for all events of this request.
+  // - other kinds: children of this request; request_id points to the request event id (currentRequestEventId).
+  private async saveChatEvent(
+    workspaceId: string,
+    agentId: string,
+    task: ITaskQueue,
+    direction: 'INBOUND' | 'OUTBOUND',
+    kind: string,
+    content: string,
+    groupId: string,
+    opts?: { currentRequestEventId?: number | null },
+  ): Promise<number | null> {
     try {
-      const link = this.resolveChatRequestLink(task, kind);
-      await AgentChatEventEntity.create({
+      let parentRequestId: number | null = null;
+      if (kind === 'request') {
+        const origin = (task as any).origin_request_event_id;
+        parentRequestId = origin != null && Number.isFinite(Number(origin)) ? Number(origin) : null;
+      } else {
+        const cur = opts?.currentRequestEventId;
+        parentRequestId = cur != null && Number.isFinite(Number(cur)) ? Number(cur) : null;
+      }
+      const created = await AgentChatEventEntity.create({
         workspace_id: workspaceId,
         agent_id: agentId,
-        task_id: task.id,
-        parent_task_id: task.parent_task_id ?? null,
-        request_id: link.requestId,
-        request_parent_id: link.requestParentId,
+        task_id: task?.id ?? null,
+        parent_task_id: task?.parent_task_id ?? null,
+        request_id: parentRequestId,
         direction,
         kind,
         content,
         collapsible_group_id: groupId,
         created_at: new Date(),
       } as any);
-    } catch {}
+      return created?.id != null ? Number(created.id) : null;
+    } catch {
+      return null;
+    }
   }
 
   async refreshWorkspaceSystemPrompts(workspaceId: string): Promise<void> {

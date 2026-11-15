@@ -14,6 +14,7 @@ export interface IAgent {
   color: string | null;
   inject_context: boolean;
   thinkingLevel?: 'off'|'minimal'|'low'|'medium'|'high'|'xhigh'|'max';
+  memory_enabled?: boolean | null;
   archived_at?: Date | string | null;
   usage_reset_at?: Date | string | null;
 }

@@ -4,15 +4,28 @@ import { Observable } from 'rxjs';
 
 const BASE_URL = 'http://localhost:8090';
 
+export interface MemoryStatus {
+  globalEnabled: boolean;
+  configured: boolean;
+  available: boolean;
+  config: { configured: boolean; serverName: string | null };
+  health: { ok: boolean; checkedAt: string | null; message: string };
+  installUrl: string;
+}
+
 export interface AppSettingsResponse {
   values: Record<string, string>;
   defaults: { piAgentDir?: string };
   effective: { piAgentDir?: string };
+  memory?: MemoryStatus;
 }
 
 @Injectable({ providedIn: 'root' })
 export class AppSettingsService {
   constructor(private http: HttpClient) {}
   get(): Observable<AppSettingsResponse> { return this.http.get<AppSettingsResponse>(`${BASE_URL}/api/settings`); }
-  update(body: { piAgentDir?: string | null }): Observable<AppSettingsResponse> { return this.http.put<AppSettingsResponse>(`${BASE_URL}/api/settings`, body); }
+  update(body: { piAgentDir?: string | null; memory?: { globalEnabled?: boolean } }): Observable<AppSettingsResponse> {
+    return this.http.put<AppSettingsResponse>(`${BASE_URL}/api/settings`, body);
+  }
+  checkMemoryHealth(): Observable<AppSettingsResponse> { return this.http.post<AppSettingsResponse>(`${BASE_URL}/api/settings/memory/health`, {}); }
 }

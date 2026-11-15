@@ -4,8 +4,8 @@ export interface IChatEvent {
   agent_id: string;
   task_id?: number | null;
   parent_task_id?: number | null;
-  request_id?: string | null;
-  request_parent_id?: string | null;
+  // self-ref: parent request event id (agent_chat_events.id). null for root requests or unscoped events.
+  request_id?: number | null;
   direction: 'INBOUND' | 'OUTBOUND';
   kind: string;
   content: string;

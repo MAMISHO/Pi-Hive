@@ -1,9 +1,11 @@
-import { Body, Controller, Delete, Get, Inject, Param, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Inject, Optional, Param, Post, Put, Query } from '@nestjs/common';
 import { IAgent } from '../../../domain/models/agent.interface.js';
 import { AgentStatus } from '../../../domain/models/agent-status.enum.js';
 import { IAgentRepository, IAgentRepositoryToken } from '../../../domain/repositories/agent-repository.interface.js';
+import { IWorkspaceRepository, IWorkspaceRepositoryToken } from '../../../../workspace/domain/repositories/workspace-repository.interface.js';
 import { agentEventEmitter, AgentRunnerService } from '../../../../agent-runner/agent-runner.service.js';
 import { AppSettingsService } from '../../../../app-settings/app-settings.service.js';
+import { NexoPalaceMemoryService } from '../../../../memory-mcp/nexo-palace-memory.service.js';
 import * as path from 'path';
 
 function normalizeModels(raw: any): Array<{ provider: string; models: string[] }> {
@@ -132,23 +134,35 @@ function randomColor(existing: Set<string>): string {
 export class AgentController {
   constructor(
     @Inject(IAgentRepositoryToken) private agentRepository: IAgentRepository,
+    @Inject(IWorkspaceRepositoryToken) private workspaceRepository: IWorkspaceRepository,
     private readonly appSettings: AppSettingsService,
     @Inject(AgentRunnerService) private readonly agentRunner: AgentRunnerService,
+    @Optional() @Inject(NexoPalaceMemoryService) private readonly memory?: NexoPalaceMemoryService,
   ) {}
 
-  @Get() async findAll(@Query('workspaceId') workspaceId?: string): Promise<IAgent[]> {
+  private async decorate(agent: IAgent | null): Promise<any> {
+    if (!agent) return agent;
+    if (!this.memory) return { ...agent, memoryPreference: (agent as any).memory_enabled === true, memoryEffective: false };
+    return this.memory.decorateAgent(agent);
+  }
+
+  private async decorateList(list: IAgent[]): Promise<any[]> {
+    return Promise.all((list || []).map((a) => this.decorate(a)));
+  }
+
+  @Get() async findAll(@Query('workspaceId') workspaceId?: string): Promise<any[]> {
     if (workspaceId) {
       const result = await this.agentRepository.getByWorkspace(workspaceId);
       const active = result.filter((a: any) => !a.archived_at).length;
       console.log(`[agents][GET] workspaceId=${workspaceId} returned=${result.length} active=${active} archived=${result.length - active}`);
-      return result;
+      return this.decorateList(result);
     }
     const all = await this.agentRepository.getAll();
     const active = all.filter((a: any) => !a.archived_at).length;
     console.log(`[agents][GET] (ALL) total=${all.length} active=${active} archived=${all.length - active}`);
-    return all;
+    return this.decorateList(all);
   }
-  @Get('admin/all') async findAllAdmin(): Promise<IAgent[]> { return await this.agentRepository.getAll(); }
+  @Get('admin/all') async findAllAdmin(): Promise<any[]> { return this.decorateList(await this.agentRepository.getAll()); }
   @Get('models') async listModels(): Promise<Array<{provider:string;models:string[]}>> {
     let agentDir = '';
     try { agentDir = await this.appSettings.resolvePiAgentDir(); } catch {}
@@ -184,7 +198,7 @@ export class AgentController {
   }
 
   @Post()
-  async create(@Body() agentData: IAgent): Promise<IAgent> {
+  async create(@Body() agentData: IAgent): Promise<any> {
     const all = await this.agentRepository.getAll();
     const ws = agentData.workspace_id;
     if (!ws) throw new Error('workspace_id is required (no hive without workspace)');
@@ -196,7 +210,14 @@ export class AgentController {
     agentData.status = agentData.status || AgentStatus.IDLE;
     if (!(agentData as any).thinkingLevel) (agentData as any).thinkingLevel = 'low';
     (agentData as any).task_state = { ...((agentData as any).task_state || {}), thinkingLevel: (agentData as any).thinkingLevel };
-    return await this.agentRepository.add(agentData);
+    if (!Object.prototype.hasOwnProperty.call(agentData as any, 'memory_enabled') || (agentData as any).memory_enabled == null) {
+      const wsEntity = await this.workspaceRepository.get(ws);
+      (agentData as any).memory_enabled = (wsEntity as any)?.memory_enabled === true;
+    } else {
+      (agentData as any).memory_enabled = (agentData as any).memory_enabled === true;
+    }
+    const created = await this.agentRepository.add(agentData);
+    return this.decorate(created);
   }
 
   @Put(':id/stop') async stop(@Param('id') id: string) { agentEventEmitter.emit('agent:stop', { agentId: id, reason: 'user_stop', notifySender: false }); return { stopped: true }; }
@@ -270,13 +291,13 @@ export class AgentController {
     const after = await this.agentRepository.get(id);
     console.log(`[agents][RESTORE] id=${id} persisted archived_at=${(after as any)?.archived_at ?? null} status=${(after as any)?.status}`);
     this.agentRunner.refreshWorkspaceSystemPrompts((after as any)?.workspace_id || (agent as any).workspace_id).catch(() => {});
-    return { ok: true, agent: after };
+    return { ok: true, agent: await this.decorate(after) };
   }
 
-  @Get(':id') async findOne(@Param('id') id: string) { return await this.agentRepository.get(id); }
+  @Get(':id') async findOne(@Param('id') id: string) { return this.decorate(await this.agentRepository.get(id)); }
 
   @Put(':id')
-  async update(@Param('id') id: string, @Body() agentData: IAgent): Promise<IAgent> {
+  async update(@Param('id') id: string, @Body() agentData: IAgent): Promise<any> {
     const all = await this.agentRepository.getAll();
     const existing = all.find((a:any)=>a.id===id);
     console.log(`[agents][PUT] id=${id} exists=${!!existing} incomingName=${(agentData as any).nickname || (agentData as any).name} incomingArchived=${(agentData as any).archived_at ?? 'n/a'} existingArchived=${(existing as any)?.archived_at ?? null}`);
@@ -289,10 +310,15 @@ export class AgentController {
     (agentData as any).task_state = { ...((existing as any)?.task_state || {}), ...((agentData as any).task_state || {}), thinkingLevel: incomingLevel };
     // preserve archived_at unless explicitly provided
     if ((agentData as any).archived_at === undefined) (agentData as any).archived_at = (existing as any)?.archived_at ?? null;
+    if (!Object.prototype.hasOwnProperty.call(agentData as any, 'memory_enabled')) {
+      (agentData as any).memory_enabled = (existing as any)?.memory_enabled ?? null;
+    } else {
+      (agentData as any).memory_enabled = (agentData as any).memory_enabled == null ? null : (agentData as any).memory_enabled === true;
+    }
     await this.agentRepository.update({ ...agentData, id } as any);
     const saved = await this.agentRepository.get(id);
     console.log(`[agents][PUT] id=${id} saved archived_at=${(saved as any)?.archived_at ?? null} name=${(saved as any)?.nickname}`);
     agentEventEmitter.emit('agent:thinking-level:changed', { agentId: id, thinkingLevel: incomingLevel });
-    return saved;
+    return this.decorate(saved);
   }
 }

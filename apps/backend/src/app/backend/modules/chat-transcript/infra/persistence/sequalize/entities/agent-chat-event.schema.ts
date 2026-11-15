@@ -1,4 +1,4 @@
-import { AutoIncrement, Column, DataType, Model, PrimaryKey, Table } from 'sequelize-typescript';
+import { AutoIncrement, BelongsTo, Column, DataType, ForeignKey, Model, PrimaryKey, Table } from 'sequelize-typescript';
 import { IAgentChatEvent } from '../../../../domain/models/agent-chat-event.interface.js';
 
 @Table({ tableName: 'agent_chat_events', timestamps: false })
@@ -20,11 +20,13 @@ export class AgentChatEventEntity extends Model<IAgentChatEvent> {
   @Column(DataType.INTEGER)
   parent_task_id: number | null;
 
-  @Column({ type: DataType.STRING, allowNull: true })
-  request_id: string | null;
+  // self-reference to the parent request event (see IAgentChatEvent.request_id)
+  @ForeignKey(() => AgentChatEventEntity)
+  @Column({ type: DataType.INTEGER, allowNull: true })
+  request_id: number | null;
 
-  @Column({ type: DataType.STRING, allowNull: true })
-  request_parent_id: string | null;
+  @BelongsTo(() => AgentChatEventEntity, 'request_id')
+  requestEvent?: AgentChatEventEntity;
 
   @Column(DataType.STRING)
   direction: string;

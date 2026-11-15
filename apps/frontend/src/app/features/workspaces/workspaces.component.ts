@@ -33,6 +33,12 @@ import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-
           <div class="info">
             <div class="name">{{ w.name }} @if (w.is_active) { <span class="pill">activo</span> }</div>
             <div class="path">{{ w.path }}</div>
+            @if (w.memoryPreference || w.memory_enabled) {
+              <div class="mem-row">
+                <span class="status-pill sm" [class.ok]="w.memoryEffective" [class.warn]="!w.memoryEffective">{{ w.memoryEffective ? 'Memoria efectiva' : 'Memoria inactiva' }}</span>
+                <span class="mem-sub">{{ w.memoryEffective ? 'Consulta externa disponible' : (w.memoryAvailable ? 'Agente/workspace no listos' : 'MCP no disponible') }}</span>
+              </div>
+            }
           </div>
           <div class="actions">
             <button pButton [label]="w.is_active ? 'Ir al workspace' : 'Abrir'" class="p-button-sm" (click)="openWorkspace(w)"></button>
@@ -60,6 +66,27 @@ import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-
       <div class="path">Efectivo: <span class="mono">{{ appSettingsEffective.piAgentDir || '—' }}</span></div>
       <div class="ok" *ngIf="settingsMsg">{{ settingsMsg }}</div>
       <div class="err" *ngIf="settingsErr">{{ settingsErr }}</div>
+
+      <div class="step"><strong>Memoria externa (Nexo-Palace, opcional)</strong></div>
+      <div class="path">Integración MCP pasiva y bajo demanda. No sustituye el estado del pipeline/gates ni la coordinación de Pi-Hive.</div>
+      @if (memoryConfigured) {
+        <label class="row"><input type="checkbox" [(ngModel)]="memoryGlobalEnabled" /> Habilitar memoria globalmente</label>
+        <div class="row muted-row">
+          <span class="status-pill" [class.ok]="memoryStatus?.available" [class.warn]="!memoryStatus?.available">{{ memoryStatus?.available ? 'Detectado en Pi' : 'No detectado' }}</span>
+          <span>{{ memoryStatus?.health?.message || 'Estado no comprobado.' }}</span>
+          <span class="flex"></span>
+          <button pButton label="Actualizar detección" class="p-button-outlined p-button-sm" type="button" (click)="checkMemory()" [disabled]="memoryChecking"></button>
+        </div>
+      } @else {
+        <div class="path">No se detecta Nexo-Palace en la configuración global de Pi. Instálalo y configúralo en Pi para habilitar esta opción.</div>
+      }
+      <div class="row">
+        <button *ngIf="memoryConfigured" pButton label="Guardar habilitación" icon="pi pi-save" class="p-button-outlined p-button-sm" type="button" (click)="saveMemoryGlobalToggle()" [disabled]="savingMemory"></button>
+        <a *ngIf="!memoryConfigured" class="install-link" [href]="memoryStatus?.installUrl || 'https://github.com/JonyDevProjects/nexo-palace'" target="_blank" rel="noopener">Instalar Nexo-Palace ↗</a>
+      </div>
+      <div class="path">Estado Pi-Hive: <span class="mono">MCP={{ memoryConfigured ? 'detectado' : 'no detectado' }} · preferencia global={{ memoryStatus?.globalEnabled ? 'activa' : 'inactiva' }}</span></div>
+      <div class="ok" *ngIf="memoryMsg">{{ memoryMsg }}</div>
+      <div class="err" *ngIf="memoryErr">{{ memoryErr }}</div>
 
       <div class="step"><strong>System prompts base (seleccionables al abrir un workspace)</strong></div>
       <div class="path">El prompt por defecto del sistema no es editable. Puedes añadir prompts base adicionales; al abrir un workspace elegirás cuál usar (por defecto el del sistema).</div>
@@ -161,6 +188,17 @@ import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-
 
       <div class="step"><strong>4) HITL & comportamiento</strong></div>
       <label class="row"><input type="checkbox" [(ngModel)]="hitlEnabled" /> Habilitar Human-in-the-loop (por defecto: off). Si está off, las comunicaciones son automáticas.</label>
+      @if (memoryReadyToShowWorkspaceToggle) {
+        <label class="row"><input type="checkbox" [(ngModel)]="memoryEnabled" (ngModelChange)="memoryUserTouched=true" /> Memoria externa del workspace (Nexo-Palace)</label>
+        <div class="path mem-hint">
+          <span class="status-pill sm" [class.ok]="workspaceMemoryEffectivePreview" [class.warn]="!workspaceMemoryEffectivePreview">{{ workspaceMemoryEffectivePreview ? 'Efectiva si el agente la habilita' : 'Preferencia guardada' }}</span>
+          <span>{{ memoryHelpText() }}</span>
+        </div>
+      } @else if (memoryStatusLoaded) {
+        <!-- Oculto cuando la memoria general no está configurada/habilitada -->
+      } @else {
+        <div class="path mem-hint"><span class="status-pill sm">Memoria</span><span>Cargando estado de memoria…</span></div>
+      }
 
       <div class="actions">
         <button pButton label="Cancelar" class="p-button-text" (click)="wizardOpen=false"></button>
@@ -200,6 +238,16 @@ import { SystemPromptsService, ISystemPrompt } from '../../core/services/system-
     .sp-name{font-weight:600;max-width:320px}
     .sp-content{width:100%;font-family:var(--font-mono);font-size:12px}
     .sp-add{border-top:1px dashed var(--border-color);padding-top:10px;display:flex;flex-direction:column;gap:8px}
+  .muted-row{gap:8px;color:var(--text-secondary);font-size:12px}
+  .status-pill{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;font-size:10px;font-weight:600;background:rgba(245,158,11,.16);color:var(--accent-amber,#f59e0b);border:1px solid rgba(245,158,11,.25)}
+  .status-pill.ok{background:rgba(34,197,94,.14);color:var(--accent-green,#22c55e);border-color:rgba(34,197,94,.25)}
+  .status-pill.warn{background:rgba(245,158,11,.14);color:var(--accent-amber,#f59e0b);border-color:rgba(245,158,11,.25)}
+  .status-pill.sm{font-size:10px;padding:1px 7px}
+  .install-link{font-size:12px;color:var(--accent-blue);text-decoration:none;margin-left:8px}
+  .install-link:hover{text-decoration:underline}
+  .mem-hint{display:flex;align-items:center;gap:8px}
+  .mem-row{display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap}
+  .mem-sub{font-size:11px;color:var(--text-muted)}
   `]
 })
 export class WorkspacesComponent implements OnInit {
@@ -210,17 +258,56 @@ export class WorkspacesComponent implements OnInit {
   chiefNickname=''; modelProviders: Array<{provider:string;models:string[]}>=[]; selectedProvider=''; selectedModelId=''; chiefModel=''; chiefColor=this.randColor(); chiefInstruction=''; useCustomChiefPrompt=false; customChiefPrompt=''; hitlEnabled=false;
   // config modal
   configOpen=false; piAgentDir=''; appSettingsDefaults: {piAgentDir?: string} = {}; appSettingsEffective: {piAgentDir?: string} = {}; savingSettings=false; settingsMsg=''; settingsErr='';
+  // memory config (global)
+  memoryStatus: any = null; memoryGlobalEnabled = false; memoryConfigured = false; savingMemory=false; memoryChecking=false; memoryMsg=''; memoryErr='';
+  memoryStatusLoaded = false;
   // global/base system prompts
   globalPrompts: ISystemPrompt[]=[]; spErr=''; newSpName=''; newSpContent='';
   // open-workspace prompt selector
   openSelectVisible=false; openTarget: IWorkspace|null=null; openSelectedPromptId='default-system-prompt';
+  // workspace memory preference (create/edit)
+  memoryEnabled = false;
+  private memoryUserTouched = false;
 
   constructor(private ws: WorkspaceService, private agents: AgentService, private sp: SystemPromptsService, private router: Router, private feedback: UiFeedbackService, private appSettings: AppSettingsService) {}
 
   ngOnInit(){ this.load(); this.agents.getModels().subscribe(m=>{this.modelProviders=(m as any)||[]; this.onProviderChange();}); }
 
   openConfig(){ this.configOpen=true; }
-  loadSettings(){ this.appSettings.get().subscribe({ next: (r: any) => { this.appSettingsDefaults = r.defaults || {}; this.appSettingsEffective = r.effective || {}; this.piAgentDir = (r.values && r.values['pi.agentDir']) || ''; }, error: () => {} }); }
+  loadSettings(onLoaded?: () => void){
+    this.appSettings.get().subscribe({
+      next: (r: any) => {
+        this.appSettingsDefaults = r.defaults || {};
+        this.appSettingsEffective = r.effective || {};
+        this.piAgentDir = (r.values && r.values['pi.agentDir']) || '';
+        this.applyMemoryStatus(r?.memory);
+        this.memoryStatusLoaded = true;
+        onLoaded?.();
+      },
+      error: () => { this.memoryStatusLoaded = true; onLoaded?.(); }
+    });
+  }
+  private applyMemoryStatus(mem: any){
+    this.memoryStatus = mem || null;
+    this.memoryGlobalEnabled = !!mem?.globalEnabled;
+    this.memoryConfigured = !!mem?.configured;
+  }
+  get memoryReadyToShowWorkspaceToggle(){ return !!this.memoryStatusLoaded && !!this.memoryGlobalEnabled && !!this.memoryConfigured; }
+  get workspaceMemoryEffectivePreview(){ return !!this.memoryEnabled && !!this.memoryStatus?.globalEnabled && !!this.memoryStatus?.configured && !!this.memoryStatus?.available; }
+  memoryHelpText(): string {
+    if (!this.memoryStatus) return '';
+    if (!this.memoryStatus.available) return `MCP no disponible ahora: ${this.memoryStatus.health?.message || 'sin conexión'}. La preferencia se conserva y será efectiva al recuperarse.`;
+    if (!this.memoryEnabled) return 'Workspace sin memoria externa. Actívala para que los agentes (si la tienen habilitada) puedan consultarla bajo demanda.';
+    return 'Workspace con memoria habilitada. Será efectiva solo para agentes con memoria habilitada y cuando el MCP esté disponible.';
+  }
+  checkMemory(){ this.memoryChecking=true; this.memoryErr=''; this.memoryMsg=''; this.appSettings.checkMemoryHealth().subscribe({ next: (r:any)=>{ this.applyMemoryStatus(r?.memory); this.memoryStatusLoaded = true; this.memoryChecking=false; this.memoryMsg = r?.memory?.configured ? 'Nexo-Palace detectado en Pi.' : 'Nexo-Palace no detectado en Pi.'; setTimeout(()=>this.memoryMsg='',2500); this.load(); }, error: ()=>{ this.memoryChecking=false; this.memoryErr='No se pudo actualizar la detección de memoria en Pi.'; } }); }
+  saveMemoryGlobalToggle(){
+    this.savingMemory=true; this.memoryMsg=''; this.memoryErr='';
+    this.appSettings.update({ memory: { globalEnabled: !!this.memoryGlobalEnabled } }).subscribe({
+      next: (r:any)=>{ this.applyMemoryStatus(r?.memory); this.memoryStatusLoaded = true; this.savingMemory=false; this.memoryMsg='Habilitación de memoria guardada.'; setTimeout(()=>this.memoryMsg='',2500); this.load(); },
+      error: (e)=>{ this.savingMemory=false; this.memoryErr=e?.error?.message||'No se pudo guardar la habilitación de memoria.'; }
+    });
+  }
   useDefaultPiAgentDir(){ this.piAgentDir = ''; }
   saveSettings(){
     this.savingSettings = true; this.settingsMsg=''; this.settingsErr='';
@@ -269,9 +356,9 @@ export class WorkspacesComponent implements OnInit {
   }
 
   async deleteWorkspace(w:IWorkspace){ const ok = await this.feedback.confirm({ title: 'Eliminar workspace', message: `Eliminar workspace "${w.name}" (${w.path})?\nEsto eliminará sus agentes y tareas.`, confirmLabel: 'Eliminar', danger: true }); if(!ok) return; this.ws.delete(w.id).subscribe({ next: ()=>{ this.feedback.success(`Workspace "${w.name}" eliminado.`); this.load(); }, error: ()=> this.feedback.error('No se pudo eliminar el workspace.') }); }
-  openCreate(){ this.editWs=null; this.resetWizard(); this.wizardOpen=true; this.chiefNickname='Chief-'+Math.random().toString(36).slice(2,5); this.chiefColor=this.randColor(); }
-  openEdit(w:IWorkspace){ this.editWs=w; this.resetWizard(); this.wizardOpen=true; this.wsName=w.name; this.hitlEnabled=!!w.hitl_enabled; this.wsPrompt = (w as any).workspace_prompt || ''; this.roleBindings = (w as any).role_bindings || ''; }
-  resetWizard(){ this.error=''; this.saving=false; this.newPath=''; this.browseVisible=false; this.wsName=''; this.wsPrompt=''; this.roleBindings=''; this.chiefNickname=''; this.chiefColor=''; this.selectedProvider=''; this.selectedModelId=''; this.chiefModel=''; this.chiefInstruction=''; this.useCustomChiefPrompt=false; this.customChiefPrompt=''; this.hitlEnabled=false; }
+  openCreate(){ this.editWs=null; this.resetWizard(); this.wizardOpen=true; this.chiefNickname='Chief-'+Math.random().toString(36).slice(2,5); this.chiefColor=this.randColor(); this.memoryEnabled = false; this.memoryStatusLoaded = false; this.memoryUserTouched = false; this.loadSettings(() => { if (!this.memoryUserTouched) this.memoryEnabled = !!(this.memoryStatus?.globalEnabled && this.memoryStatus?.configured); }); }
+  openEdit(w:IWorkspace){ this.editWs=w; this.resetWizard(); this.wizardOpen=true; this.wsName=w.name; this.hitlEnabled=!!w.hitl_enabled; this.wsPrompt = (w as any).workspace_prompt || ''; this.roleBindings = (w as any).role_bindings || ''; this.memoryEnabled = (w as any).memory_enabled === true; this.memoryStatusLoaded = false; this.memoryUserTouched = false; this.loadSettings(); }
+  resetWizard(){ this.error=''; this.saving=false; this.newPath=''; this.browseVisible=false; this.wsName=''; this.wsPrompt=''; this.roleBindings=''; this.chiefNickname=''; this.chiefColor=''; this.selectedProvider=''; this.selectedModelId=''; this.chiefModel=''; this.chiefInstruction=''; this.useCustomChiefPrompt=false; this.customChiefPrompt=''; this.hitlEnabled=false; this.memoryEnabled=false; this.memoryUserTouched=false; }
   browse(p:string){ this.browseVisible=true; this.ws.browseDirs(p||undefined).subscribe(r=>{ this.browseCurrent=r.current; this.browseParent=r.parent; this.browseDirs=r.dirs||[]; if(r.error) this.error=r.error; }); }
   useFolder(){ this.newPath=this.browseCurrent; this.browseVisible=false; this.wsName=this.newPath.split('/').filter(Boolean).pop()||'workspace'; }
   currentModels(): string[] { const p=this.modelProviders.find(x=>x.provider===this.selectedProvider); return p?p.models:[]; }
@@ -281,14 +368,15 @@ export class WorkspacesComponent implements OnInit {
     this.error='';
     if(this.editWs){
       this.saving=true;
-      this.ws.update(this.editWs.id,{name:this.wsName||this.editWs.name, hitl_enabled:this.hitlEnabled, workspace_prompt: (this.wsPrompt||'').trim() || null, role_bindings: (this.roleBindings||'').trim() || null} as any).subscribe({next:()=>{this.wizardOpen=false; this.saving=false; this.load(); this.ws.refreshActive();}, error:(e)=>{this.error=e?.error?.message||'Error'; this.saving=false;}});
+      this.ws.update(this.editWs.id,{name:this.wsName||this.editWs.name, hitl_enabled:this.hitlEnabled, workspace_prompt: (this.wsPrompt||'').trim() || null, role_bindings: (this.roleBindings||'').trim() || null, memory_enabled: !!this.memoryEnabled} as any).subscribe({next:()=>{this.wizardOpen=false; this.saving=false; this.load(); this.ws.refreshActive();}, error:(e)=>{this.error=e?.error?.message||'Error'; this.saving=false;}});
       return;
     }
     if(!this.newPath.trim()) { this.error='La carpeta es obligatoria'; return; }
     if(!this.selectedProvider||!this.selectedModelId){ this.error='Proveedor y modelo son obligatorios'; return; }
     if(!this.chiefColor) this.chiefColor=this.randColor();
     this.saving=true; this.chiefModel=`${this.selectedProvider}/${this.selectedModelId}`;
-    this.ws.create(this.wsName||'workspace', this.newPath.trim(), this.hitlEnabled, (this.wsPrompt||'').trim() || null).subscribe({
+    const memPayload = (this.memoryStatusLoaded && this.memoryGlobalEnabled && this.memoryConfigured) ? !!this.memoryEnabled : undefined;
+    this.ws.create(this.wsName||'workspace', this.newPath.trim(), this.hitlEnabled, (this.wsPrompt||'').trim() || null, memPayload as any).subscribe({
       next:(ws)=>{
         const finish=()=>{ const chief:any={ id:`chief-${Date.now().toString(36)}`, name:this.chiefNickname||'Chief', nickname:this.chiefNickname||'Chief', role:'CHIEF', status:'IDLE', workspace_id:ws.id, color:this.chiefColor, additional_instruction:this.chiefInstruction||null, inject_context:true, task_state:{model:this.chiefModel} };
           this.agents.create(chief).subscribe({ next:()=>{ this.ws.refreshActive(); this.wizardOpen=false; this.saving=false; this.load(); setTimeout(()=>this.router.navigateByUrl(`/workspaces/${ws.id}/swarm-monitor`), 50); }, error:(e)=>{this.error=e?.error?.message||'Error creando chief (¿color duplicado?)'; this.saving=false;} });

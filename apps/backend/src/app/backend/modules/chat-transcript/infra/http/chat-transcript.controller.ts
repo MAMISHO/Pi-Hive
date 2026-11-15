@@ -20,7 +20,7 @@ export class ChatTranscriptController {
     const light = mode !== 'full';
     const where: any = { agent_id: agentId };
     if (before) where.id = { [Op.lt]: Number(before) };
-    if (requestId) where.request_id = requestId;
+    if (requestId) where.request_id = Number(requestId);
 
     // Overfetch then build a compact window: for completed turns collapse intermediates
     // into a single placeholder group so request/response dominate the budget.
@@ -153,10 +153,15 @@ export class ChatTranscriptController {
   // delegated child requests (request_parent_id chain) for scoped/auditable tracing.
   @Get('request/:requestId/trace')
   async getRequestTrace(@Param('requestId') requestId: string) {
+    const rootId = Number(requestId);
+    if (!Number.isFinite(rootId)) return { root_request_id: requestId, request_ids: [], events: [] };
+
     const collected: any[] = [];
     const seenIds = new Set<number>();
-    const queue: string[] = [requestId];
-    const seenReq = new Set<string>();
+    // BFS over request event ids (self-ref): include the request row (id=rid) and all its children (request_id=rid),
+    // then traverse into any child request rows (kind='request') by their own ids.
+    const queue: number[] = [rootId];
+    const seenReq = new Set<number>();
 
     while (queue.length) {
       const rid = queue.shift()!;
@@ -164,7 +169,7 @@ export class ChatTranscriptController {
       seenReq.add(rid);
 
       const rows = await AgentChatEventEntity.findAll({
-        where: { request_id: rid } as any,
+        where: { [Op.or]: [{ id: rid }, { request_id: rid }] } as any,
         order: [['id', 'ASC']],
         limit: 2000,
       });
@@ -174,17 +179,10 @@ export class ChatTranscriptController {
           seenIds.add(ev.id);
           collected.push(ev);
         }
-      }
-
-      // discover delegated child requests spawned from this request
-      const children = await AgentChatEventEntity.findAll({
-        where: { request_parent_id: rid, kind: 'request' } as any,
-        attributes: ['request_id'],
-        limit: 500,
-      });
-      for (const c of children) {
-        const childRid = (c as any).request_id || (c as any).get?.('request_id');
-        if (childRid && !seenReq.has(childRid)) queue.push(childRid);
+        // delegated child request: its row points to this request (request_id=rid) and is itself a request node
+        if (ev.kind === 'request' && ev.request_id === rid && !seenReq.has(ev.id)) {
+          queue.push(ev.id);
+        }
       }
     }
 
@@ -194,7 +192,7 @@ export class ChatTranscriptController {
       if (ta !== tb) return ta - tb;
       return (Number(a.id) || 0) - (Number(b.id) || 0);
     });
-    return { root_request_id: requestId, request_ids: Array.from(seenReq), events: collected };
+    return { root_request_id: rootId, request_ids: Array.from(seenReq), events: collected };
   }
 
 }

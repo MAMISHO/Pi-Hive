@@ -17,6 +17,7 @@ export class AgentMapper {
       color: json.color ?? null,
       inject_context: json.inject_context !== false,
       thinkingLevel: (json as any).thinking_level ?? (json as any).thinkingLevel ?? 'low',
+      memory_enabled: Object.prototype.hasOwnProperty.call(json as any, 'memory_enabled') ? ((json as any).memory_enabled ?? null) : null,
       archived_at: (json as any).archived_at ?? null,
       usage_reset_at: (json as any).usage_reset_at ?? null,
     };
@@ -36,6 +37,7 @@ export class AgentMapper {
       color: agent.color ?? null,
       inject_context: agent.inject_context !== false,
       thinking_level: (agent as any).thinkingLevel || 'low',
+      memory_enabled: Object.prototype.hasOwnProperty.call(agent as any, 'memory_enabled') ? ((agent as any).memory_enabled ?? null) : undefined,
       archived_at: (agent as any).archived_at ?? null,
       usage_reset_at: (agent as any).usage_reset_at ?? null,
     } as any;

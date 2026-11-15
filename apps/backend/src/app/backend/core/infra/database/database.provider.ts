@@ -53,6 +53,7 @@ export const databaseProviders = [
             ['callback_context', "ALTER TABLE tasks_queue ADD COLUMN callback_context TEXT;"],
             ['callback_final', "ALTER TABLE tasks_queue ADD COLUMN callback_final BOOLEAN;"],
             ['plan_ref', "ALTER TABLE tasks_queue ADD COLUMN plan_ref INTEGER;"],
+            ['origin_request_event_id', "ALTER TABLE tasks_queue ADD COLUMN origin_request_event_id INTEGER;"],
           ];
           for (const [name, sql] of adds) {
             if (!names.has(name)) {
@@ -72,6 +73,10 @@ export const databaseProviders = [
             await sequelize.query("ALTER TABLE agents ADD COLUMN thinking_level VARCHAR(16) DEFAULT 'low';");
             console.log('[DB] added agents.thinking_level');
           }
+          if (!anames.has('memory_enabled')) {
+            await sequelize.query("ALTER TABLE agents ADD COLUMN memory_enabled BOOLEAN;");
+            console.log('[DB] added agents.memory_enabled');
+          }
           if (!anames.has('usage_reset_at')) {
             await sequelize.query("ALTER TABLE agents ADD COLUMN usage_reset_at DATETIME;");
             console.log('[DB] added agents.usage_reset_at');
@@ -88,17 +93,17 @@ export const databaseProviders = [
             await sequelize.query("ALTER TABLE workspaces ADD COLUMN role_bindings TEXT;");
             console.log('[DB] added workspaces.role_bindings');
           }
+          if (!wnames.has('memory_enabled')) {
+            await sequelize.query("ALTER TABLE workspaces ADD COLUMN memory_enabled BOOLEAN;");
+            console.log('[DB] added workspaces.memory_enabled');
+          }
         } catch (e) { console.warn('[DB] workspaces migrate:', (e as any)?.message || e); }
         try {
           const [ecols]: any = await sequelize.query("PRAGMA table_info(agent_chat_events);");
           const enames = new Set((ecols || []).map((c: any) => c.name));
           if (!enames.has('request_id')) {
-            await sequelize.query("ALTER TABLE agent_chat_events ADD COLUMN request_id VARCHAR(255);");
-            console.log('[DB] added agent_chat_events.request_id');
-          }
-          if (!enames.has('request_parent_id')) {
-            await sequelize.query("ALTER TABLE agent_chat_events ADD COLUMN request_parent_id VARCHAR(255);");
-            console.log('[DB] added agent_chat_events.request_parent_id');
+            await sequelize.query("ALTER TABLE agent_chat_events ADD COLUMN request_id INTEGER;");
+            console.log('[DB] added agent_chat_events.request_id (self-ref)');
           }
         } catch (e) { console.warn('[DB] agent_chat_events migrate:', (e as any)?.message || e); }
         console.log('Database synchronized (alter).');

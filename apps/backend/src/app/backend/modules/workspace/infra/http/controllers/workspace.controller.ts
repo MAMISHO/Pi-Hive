@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Inject, Param, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Inject, Optional, Param, Post, Put, Query } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 import { IWorkspace } from '../../../domain/models/workspace.interface.js';
@@ -9,18 +9,33 @@ import { agentEventEmitter } from '../../../../agent-runner/agent-runner.service
 import { AgentEntity } from '../../../../agent/infra/persistence/sequalize/entities/agent.schema.js';
 import { TaskQueueEntity } from '../../../../task-queue/infra/persistence/sequalize/entities/task-queue.schema.js';
 import { AgentSessionHistoryEntity } from '../../../../session-history/infra/persistence/sequalize/entities/agent-session-history.schema.js';
+import { NexoPalaceMemoryService } from '../../../../memory-mcp/nexo-palace-memory.service.js';
 
 @Controller('workspaces')
 export class WorkspaceController {
-  constructor(@Inject(IWorkspaceRepositoryToken) private workspaceRepository: IWorkspaceRepository, @Inject(IAgentRepositoryToken) private agentRepository: IAgentRepository) {}
+  constructor(
+    @Inject(IWorkspaceRepositoryToken) private workspaceRepository: IWorkspaceRepository,
+    @Inject(IAgentRepositoryToken) private agentRepository: IAgentRepository,
+    @Optional() @Inject(NexoPalaceMemoryService) private readonly memory?: NexoPalaceMemoryService,
+  ) {}
+
+  private async withMemoryState<T extends Record<string, any>>(ws: T | null): Promise<any> {
+    if (!ws) return ws;
+    if (!this.memory) return { ...ws, memoryPreference: (ws as any).memory_enabled === true, memoryEffective: false, memoryAvailable: false, memoryGlobalEnabled: false, memoryConfigured: false };
+    return this.memory.decorateWorkspace(ws);
+  }
+
+  private async withMemoryStateList(list: any[]): Promise<any[]> {
+    return Promise.all((list || []).map((ws) => this.withMemoryState(ws)));
+  }
 
   private async deactivateAll() {
     const all = await this.workspaceRepository.getAll();
     for (const w of all) if ((w as any).is_active) { (w as any).is_active = false; await this.workspaceRepository.update(w as any); }
   }
 
-  @Get() async getAll(): Promise<IWorkspace[]> { return await this.workspaceRepository.getAll(); }
-  @Get('active') async getActive(): Promise<IWorkspace | null> { return await this.workspaceRepository.getActive(); }
+  @Get() async getAll(): Promise<any[]> { return this.withMemoryStateList(await this.workspaceRepository.getAll()); }
+  @Get('active') async getActive(): Promise<any | null> { return this.withMemoryState(await this.workspaceRepository.getActive()); }
 
   @Get('browse/dirs')
   browseDirs(@Query('path') dirPath?: string): any {
@@ -34,19 +49,33 @@ export class WorkspaceController {
   }
 
   @Post()
-  async create(@Body() body: { name: string; path: string; hitl_enabled?: boolean; workspace_prompt?: string | null }): Promise<IWorkspace> {
+  async create(@Body() body: { name: string; path: string; hitl_enabled?: boolean; workspace_prompt?: string | null; memory_enabled?: boolean | null }): Promise<any> {
     await this.deactivateAll();
-    return await this.workspaceRepository.add({ name: body.name, path: body.path, is_active: true, hitl_enabled: body.hitl_enabled ?? false, active_system_prompt_id: DEFAULT_SYSTEM_PROMPT_ID, workspace_prompt: body.workspace_prompt ?? null } as any);
+    const memStatus = this.memory ? await this.memory.getSanitizedStatus() : null;
+    const hasExplicit = body && Object.prototype.hasOwnProperty.call(body, 'memory_enabled') && body.memory_enabled !== null && body.memory_enabled !== undefined;
+    // Default preference follows global memory enabled/configured in general settings (not transient availability).
+    const memoryEnabled = hasExplicit ? body.memory_enabled === true : !!(memStatus?.globalEnabled && memStatus?.configured);
+    const created = await this.workspaceRepository.add({
+      name: body.name,
+      path: body.path,
+      is_active: true,
+      hitl_enabled: body.hitl_enabled ?? false,
+      active_system_prompt_id: DEFAULT_SYSTEM_PROMPT_ID,
+      workspace_prompt: body.workspace_prompt ?? null,
+      memory_enabled: memoryEnabled,
+    } as any);
+    return this.withMemoryState(created);
   }
 
   @Get(':id/agents')
   async getAgents(@Param('id') id: string) {
     const list = await this.agentRepository.getByWorkspace(id);
     console.log(`[workspaces][GET agents] workspaceId=${id} returned=${list.length}`);
-    return list;
+    if (!this.memory) return list;
+    return Promise.all((list || []).map((a) => this.memory!.decorateAgent(a)));
   }
 
-  @Get(':id') async getById(@Param('id') id: string): Promise<IWorkspace> { return await this.workspaceRepository.get(id) as IWorkspace; }
+  @Get(':id') async getById(@Param('id') id: string): Promise<any> { return this.withMemoryState(await this.workspaceRepository.get(id) as IWorkspace); }
 
   @Put(':id/activate')
   async activate(@Param('id') id: string): Promise<{ ok: boolean }> {
@@ -58,12 +87,12 @@ export class WorkspaceController {
   }
 
   @Put(':id')
-  async update(@Param('id') id: string, @Body() body: Partial<IWorkspace>): Promise<IWorkspace> {
+  async update(@Param('id') id: string, @Body() body: Partial<IWorkspace>): Promise<any> {
     const ws = await this.workspaceRepository.get(id);
     if (!ws) throw new Error('Workspace not found');
     Object.assign(ws as any, body, { id });
     await this.workspaceRepository.update(ws as any);
-    return await this.workspaceRepository.get(id) as IWorkspace;
+    return this.withMemoryState(await this.workspaceRepository.get(id) as IWorkspace);
   }
 
   @Post(':id/session/reset')

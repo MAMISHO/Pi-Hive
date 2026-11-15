@@ -8,5 +8,6 @@ export interface IWorkspace {
   workspace_prompt: string | null;
   role_bindings?: string | null;
   hitl_enabled: boolean;
+  memory_enabled?: boolean | null;
   created_at: Date | string | null;
 }

@@ -31,6 +31,9 @@ export class WorkspaceEntity extends Model<IWorkspace> {
   @Column({ type: DataType.BOOLEAN, defaultValue: false })
   hitl_enabled: boolean;
 
+  @Column({ type: DataType.BOOLEAN, allowNull: true, defaultValue: null })
+  memory_enabled: boolean | null;
+
   @Column(DataType.DATE)
   created_at: Date | null;
 }

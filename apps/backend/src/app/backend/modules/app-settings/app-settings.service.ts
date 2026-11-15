@@ -4,6 +4,7 @@ import * as path from 'path';
 import { AppSettingEntity } from './infra/persistence/sequalize/entities/app-setting.schema.js';
 
 export const PI_AGENT_DIR_KEY = 'pi.agentDir';
+export const MEMORY_GLOBAL_ENABLED_KEY = 'memory.globalEnabled';
 
 @Injectable()
 export class AppSettingsService {
@@ -12,9 +13,7 @@ export class AppSettingsService {
       const row = await AppSettingEntity.findByPk(key);
       const v = (row as any)?.get ? (row as any).get('value') : (row as any)?.value;
       return v == null || v === '' ? null : String(v);
-    } catch {
-      return null;
-    }
+    } catch { return null; }
   }
 
   async set(key: string, value: string | null): Promise<void> {
@@ -35,9 +34,14 @@ export class AppSettingsService {
         if (k && v != null && v !== '') out[String(k)] = String(v);
       }
       return out;
-    } catch {
-      return {};
-    }
+    } catch { return {}; }
+  }
+
+  async getPublicValues(): Promise<Record<string, string>> {
+    const all = await this.getAll();
+    return Object.fromEntries(Object.entries(all).filter(([key]) =>
+      !key.startsWith('memory.mcp.'), // hide legacy values from the removed Pi-Hive-owned MCP config
+    ));
   }
 
   defaultPiAgentDir(): string {
@@ -48,7 +52,18 @@ export class AppSettingsService {
 
   async resolvePiAgentDir(): Promise<string> {
     const configured = await this.get(PI_AGENT_DIR_KEY);
-    if (configured && String(configured).trim()) return String(configured).trim();
-    return this.defaultPiAgentDir();
+    return configured?.trim() || this.defaultPiAgentDir();
+  }
+
+  async getMemoryGlobalEnabled(): Promise<boolean> {
+    const saved = await this.get(MEMORY_GLOBAL_ENABLED_KEY);
+    // The integration is still unavailable until Pi's MCP is detected. Default-on lets an
+    // already configured Pi server become usable without requiring a duplicate enable step;
+    // an explicit user choice (including false) remains authoritative.
+    return saved == null ? true : saved === 'true';
+  }
+
+  async setMemoryGlobalEnabled(enabled: boolean): Promise<void> {
+    await this.set(MEMORY_GLOBAL_ENABLED_KEY, enabled ? 'true' : 'false');
   }
 }

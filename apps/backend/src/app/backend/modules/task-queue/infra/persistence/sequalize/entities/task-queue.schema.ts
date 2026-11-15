@@ -86,6 +86,10 @@ export class TaskQueueEntity extends Model<ITaskQueue> {
   @Column({ type: DataType.INTEGER, allowNull: true })
   declare plan_ref: number | null;
 
+  // id of the originating agent_chat_events request event (delegation/request tracing)
+  @Column({ type: DataType.INTEGER, allowNull: true })
+  declare origin_request_event_id: number | null;
+
   @Column(DataType.DATE)
   declare created_at: Date;
 

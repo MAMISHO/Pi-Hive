@@ -1,5 +1,5 @@
 import { PromptBuilderService } from './prompt-builder.service.js';
-import { allowedToolsForTaskFlow, buildPlannerRoster, explicitRecipientFromRequest, formatDelegationProgressSummary, selectCallbackInstruction } from './delegation-runtime-policy.js';
+import { allowedToolsForTaskFlow, buildPlannerRoster, canPlanDelegation, explicitRecipientFromRequest, formatDelegationProgressSummary, selectCallbackInstruction } from './delegation-runtime-policy.js';
 import { DelegationPlanStore, type DelegationNode } from './delegation-plan.store.js';
 
 const agent: any = { id: 'chief-id', nickname: 'Chief-X', role: 'CHIEF', workspace_id: 'ws', additional_instruction: 'Una sola vez' };
@@ -19,6 +19,14 @@ describe('PromptBuilderService migration prompt layers', () => {
     expect(prompt).not.toContain('harness_engineering →');
     expect(prompt.match(/Una sola vez/g)).toHaveLength(1);
     expect(prompt).toContain('orchestration → Alias-Now');
+  });
+
+  it('includes concise external memory guidance only when effective', async () => {
+    const without = await builder.buildSystem({ agent, team: [agent, worker], memoryEffective: false });
+    const withMem = await builder.buildSystem({ agent, team: [agent, worker], memoryEffective: true });
+    expect(without).not.toContain('Nexo-Palace');
+    expect(withMem).toContain('MEMORIA EXTERNA · Nexo-Palace');
+    expect(withMem).toContain('tools MCP de Pi');
   });
 
   it('keeps invalid/absent bindings compatible and rejects agents from other workspaces', () => {
@@ -88,6 +96,16 @@ describe('PromptBuilderService migration prompt layers', () => {
     expect(callback).toContain('solo ese tramo pendiente');
     expect(allowedToolsForTaskFlow('delegation_result', 'WORKER', true)).toContain('plan_delegation');
     expect(allowedToolsForTaskFlow('delegation_result', 'WORKER', false)).not.toContain('plan_delegation');
+    expect(allowedToolsForTaskFlow('delegation_result', 'WORKER', false, true)).toEqual([]);
+    expect(allowedToolsForTaskFlow('delegation_result', 'CHIEF', false, true)).toEqual(['read', 'delegate_task']);
+  });
+
+  it('does not reopen a route that already reached a terminal state', () => {
+    expect(canPlanDelegation({ flow: 'delegation_result', planState: null })).toBe(true);
+    expect(canPlanDelegation({ flow: 'delegation_result', planState: 'active' })).toBe(false);
+    expect(canPlanDelegation({ flow: 'delegation_result', planState: 'done' })).toBe(false);
+    expect(canPlanDelegation({ flow: 'delegation_progress', planState: null })).toBe(false);
+    expect(canPlanDelegation({ flow: 'direct', planState: null, explicitlyAddressedRecipient: true })).toBe(false);
   });
 
   it('selects the active direct request over stale inherited callback context', () => {

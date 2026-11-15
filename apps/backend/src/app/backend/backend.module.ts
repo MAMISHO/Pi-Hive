@@ -12,6 +12,7 @@ import { SessionHistoryModule } from './modules/session-history/session-history.
 import { ChatTranscriptModule } from './modules/chat-transcript/chat-transcript.module.js';
 import { PongModule } from './modules/pong/pong.module.js';
 import { AppSettingsModule } from './modules/app-settings/app-settings.module.js';
+import { MemoryMcpModule } from './modules/memory-mcp/memory-mcp.module.js';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { AppSettingsModule } from './modules/app-settings/app-settings.module.js
     AgentModule,
     TaskQueueModule,
     AgentMemoryModule,
+    MemoryMcpModule,
     AgentRunnerModule,
     PongModule,
     AppSettingsModule,

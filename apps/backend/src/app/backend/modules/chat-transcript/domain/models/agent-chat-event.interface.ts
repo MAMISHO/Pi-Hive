@@ -7,8 +7,10 @@ export interface IAgentChatEvent {
   agent_id: string;
   task_id: number | null;
   parent_task_id: number | null;
-  request_id: string | null;
-  request_parent_id: string | null;
+  // self-reference: id of the parent request event (agent_chat_events.id).
+  // - kind='request': points to the originating request event (null for root/user-origin requests)
+  // - other kinds (response/thinking/tool/plan/...): point to this event's own request event id
+  request_id: number | null;
   direction: ChatDirection;
   kind: ChatKind;
   content: string;

@@ -33,8 +33,9 @@ export function buildPlannerRoster(
 }
 
 /** Tool access follows persisted task flow, role and explicit routing state. */
-export function allowedToolsForTaskFlow(flow?: string | null, role?: string | null, planningAllowed = true): string[] {
+export function allowedToolsForTaskFlow(flow?: string | null, role?: string | null, planningAllowed = true, terminalWorkerResult = false): string[] {
   if (flow === 'delegation_progress') return [];
+  if (flow === 'delegation_result' && terminalWorkerResult && String(role || '').toUpperCase() !== 'CHIEF') return [];
   if (String(role || '').toUpperCase() === 'CHIEF') {
     return planningAllowed
       ? ['read', 'delegate_task', 'plan_delegation']
@@ -42,6 +43,13 @@ export function allowedToolsForTaskFlow(flow?: string | null, role?: string | nu
   }
   const tools = ['read', 'bash', 'edit', 'write', 'delegate_task'];
   return planningAllowed ? [...tools, 'plan_delegation'] : tools;
+}
+
+/** Planning is available only when no route is attached; a terminal plan is still a completed route. */
+export function canPlanDelegation(input: { flow?: string | null; planState?: string | null; explicitlyAddressedRecipient?: boolean }): boolean {
+  return input.flow !== 'delegation_progress'
+    && !input.planState
+    && !input.explicitlyAddressedRecipient;
 }
 
 /** Resolve an explicitly addressed recipient from the active roster, without an LLM. */
