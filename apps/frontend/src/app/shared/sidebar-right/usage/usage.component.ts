@@ -1,4 +1,4 @@
-import { Component, Input, OnChanges, SimpleChanges } from '@angular/core';
+import { Component, Input, OnChanges } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RunUsage, UsageTotals, emptyTotals } from '../../../core/services/token-usage.service';
 import { IAgent } from '../../../core/models/agent.model';
@@ -17,7 +17,7 @@ export class UsageComponent implements OnChanges {
 
   private agentMap = new Map<string, IAgent>();
 
-  ngOnChanges(changes: SimpleChanges): void {
+  ngOnChanges(changes: any): void {
     if (changes['agents']) this.agentMap = new Map((this.agents || []).map(a => [a.id, a]));
   }
 

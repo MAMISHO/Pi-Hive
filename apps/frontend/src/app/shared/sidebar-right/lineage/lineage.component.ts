@@ -1,4 +1,4 @@
-import { AfterViewInit, ChangeDetectorRef, Component, ElementRef, EventEmitter, Input, OnChanges, OnDestroy, Output, QueryList, SimpleChanges, ViewChildren } from '@angular/core';
+import { AfterViewInit, ChangeDetectorRef, Component, ElementRef, EventEmitter, Input, OnChanges, OnDestroy, Output, QueryList, ViewChildren } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TagModule } from 'primeng/tag';
 import { ButtonModule } from 'primeng/button';
@@ -17,6 +17,8 @@ interface GraphNode extends ITaskQueue {
 }
 
 interface Edge { x1: number; y1: number; x2: number; y2: number; color: string; kind: 'down' | 'return-progress' | 'return-resolved-progress' | 'return-final' | 'spine'; d: string; dashed: boolean; key: string; }
+interface LifelineSegment { y1: number; y2: number; waiting: boolean; key: string; }
+interface Lifeline { id: string; lane: number; x: number; color: string; label: string; segments: LifelineSegment[]; }
 
 @Component({
   selector: 'app-lineage',
@@ -34,15 +36,17 @@ export class LineageComponent implements OnChanges, AfterViewInit, OnDestroy {
 
   nodes: GraphNode[] = [];
   edges: Edge[] = [];
+  lifelines: Lifeline[] = [];
   cy: number[] = [];
   graphW = 24; graphH = 0;
-  private laneW = 16;
+  private laneW = 20;
   private agentMap = new Map<string, IAgent>();
+  private agentLane = new Map<string, number>(); // agent lanes only (user excluded), left-to-right by delegation/appearance
   private sub: any;
 
   constructor(private cdr: ChangeDetectorRef) {}
 
-  ngOnChanges(changes: SimpleChanges): void {
+  ngOnChanges(changes: any): void {
     if (changes['agents']) {
       this.agentMap = new Map((this.agents || []).map(a => [a.id, a]));
     }
@@ -61,6 +65,18 @@ export class LineageComponent implements OnChanges, AfterViewInit, OnDestroy {
     const byId = new Map(list.map(t => [t.id!, t]));
     const chrono = [...list].sort((a, b) => new Date(a.created_at as any).getTime() - new Date(b.created_at as any).getTime() || (a.id ?? 0) - (b.id ?? 0));
 
+    // Independent lane per agent (excluding user), left-to-right by delegation/appearance.
+    // e.g. Chief-ugy -> x=10, Bob -> x=30, Pam -> x=50
+    this.agentLane = new Map<string, number>();
+    const ensureLane = (id: string | undefined | null) => {
+      if (!id || id === 'user' || this.agentLane.has(id)) return;
+      this.agentLane.set(id, this.agentLane.size);
+    };
+    for (const t of chrono) {
+      ensureLane(t.sender_agent_id);
+      ensureLane(t.receiver_agent_id);
+    }
+
     const isProgressTask = (t: ITaskQueue): boolean => {
       const flowName = (t.task_flow || 'direct') as string;
       return flowName === 'delegation_progress' || (t.callback_final === false && !!t.parent_task_callback);
@@ -69,41 +85,16 @@ export class LineageComponent implements OnChanges, AfterViewInit, OnDestroy {
       const flowName = (t.task_flow || 'direct') as string;
       return flowName === 'delegation_result' || (typeof t.payload === 'string' && t.payload.includes('[DELEGATION RESULT'));
     };
-    const isReturnTask = (t: ITaskQueue): boolean => isProgressTask(t) || isResultTask(t) || !!t.parent_task_callback;
-
     const findFulfilled = (t: ITaskQueue): ITaskQueue | undefined => {
       let cur: ITaskQueue | undefined = t.parent_task_id ? byId.get(t.parent_task_id) : undefined;
       const seen = new Set<number>();
       while (cur && cur.id != null && !seen.has(cur.id)) {
         seen.add(cur.id);
+        // request: sender=requester, receiver=executor -> response: sender=executor, receiver=requester
         if (cur.sender_agent_id === t.receiver_agent_id && cur.receiver_agent_id === t.sender_agent_id) return cur;
         cur = cur.parent_task_id ? byId.get(cur.parent_task_id) : undefined;
       }
       return undefined;
-    };
-
-    const laneById = new Map<number, number>();
-    const getLane = (t: ITaskQueue, seen = new Set<number>()): number => {
-      if (t.id != null && laneById.has(t.id)) return laneById.get(t.id)!;
-      if (t.id != null) { if (seen.has(t.id)) return 0; seen.add(t.id); }
-      let lane = 0;
-      if (!t.parent_task_id) {
-        lane = 0;
-      } else if (isReturnTask(t)) {
-        const fulfilled = findFulfilled(t);
-        if (fulfilled) {
-          const fParent = fulfilled.parent_task_id ? byId.get(fulfilled.parent_task_id) : undefined;
-          lane = fParent ? getLane(fParent, seen) : 0;
-        } else {
-          const p = byId.get(t.parent_task_id);
-          lane = p ? getLane(p, seen) : 0;
-        }
-      } else {
-        const p = byId.get(t.parent_task_id);
-        lane = (p ? getLane(p, seen) : 0) + 1;
-      }
-      if (t.id != null) laneById.set(t.id, Math.max(0, lane));
-      return Math.max(0, lane);
     };
 
     const depthOf = (t: ITaskQueue, seen = new Set<number>()): number => {
@@ -116,29 +107,96 @@ export class LineageComponent implements OnChanges, AfterViewInit, OnDestroy {
       const depth = depthOf(t);
       const isProgress = isProgressTask(t);
       const isResult = isResultTask(t);
-      const isFinal = isResult && (t.callback_final !== false);
-      const isReturn = isReturnTask(t);
-      const lane = getLane(t);
-      const actorId = isReturn ? t.sender_agent_id : t.receiver_agent_id;
-      const color = this.agentColor(actorId);
-      return { ...t, depth, lane, isReturn, isProgress, isFinal, flow: isReturn ? 'out' : 'in', color, agentLabel: this.label(t.receiver_agent_id) } as GraphNode;
+      const fulfilled = findFulfilled(t);
+      // Response edge only when this event fulfills a prior request (inverse requester/executor pair).
+      const isResponseEdge = !!fulfilled;
+      const isFinal = isResponseEdge && isResult && (t.callback_final !== false);
+      // Vertex sits on the receiver's agent lane (executor for requests, requester for responses).
+      const lane = this.agentLane.get(t.receiver_agent_id || 'user') ?? 0;
+      // Lane/node color follows the receiver's lane; edge color follows the sender.
+      const color = this.agentColor(t.receiver_agent_id || 'user');
+      return { ...t, depth, lane, isReturn: isResponseEdge, isProgress: isResponseEdge && isProgress, isFinal, flow: isResponseEdge ? 'out' : 'in', color, agentLabel: this.label(t.receiver_agent_id) } as GraphNode;
     });
   }
 
   measure(): void {
     const els = this.rows?.toArray().map(r => r.nativeElement) || [];
-    if (!els.length || !this.nodes.length) { this.edges = []; this.cy = []; this.graphW = 24; this.graphH = 0; return; }
-    const maxLane = Math.max(0, ...this.nodes.map(n => n.lane));
-    this.graphW = 18 + maxLane * this.laneW + 14;
+    if (!els.length || !this.nodes.length) { this.edges = []; this.lifelines = []; this.cy = []; this.graphW = 24; this.graphH = 0; return; }
+    const laneCount = Math.max(1, this.agentLane.size || 1);
+    this.graphW = 10 + (laneCount - 1) * this.laneW + 22;
     const tl = (els[0].offsetParent as HTMLElement) || els[0].parentElement;
     const tlTop = tl ? tl.getBoundingClientRect().top : 0;
     this.cy = els.map(el => { const r = el.getBoundingClientRect(); return (r.top - tlTop) + 14; });
     this.graphH = els.reduce((s, el) => s + el.offsetHeight, 8);
     this.edges = this.buildEdges();
+    this.lifelines = this.buildLifelines();
     this.cdr.detectChanges();
   }
 
-  cx(n: GraphNode): number { return 10 + n.lane * this.laneW; }
+  cx(n: GraphNode): number { return this.xOf(n.receiver_agent_id || 'user'); }
+  private xOf(id: string): number {
+    if (!id || id === 'user') return 10; // align user-origin with first agent lane
+    return 10 + (this.agentLane.get(id) ?? 0) * this.laneW;
+  }
+
+  private buildLifelines(): Lifeline[] {
+    const idx = new Map<number, number>();
+    this.nodes.forEach((n, i) => { if (n.id != null) idx.set(n.id, i); });
+    const findFulfilledNode = (n: GraphNode): GraphNode | null => {
+      let curIdx = n.parent_task_id != null ? idx.get(n.parent_task_id) : undefined;
+      const seen = new Set<number>();
+      while (curIdx != null && !seen.has(curIdx)) {
+        seen.add(curIdx);
+        const a = this.nodes[curIdx];
+        if (a.sender_agent_id === n.receiver_agent_id && a.receiver_agent_id === n.sender_agent_id) return a;
+        curIdx = a.parent_task_id != null ? idx.get(a.parent_task_id) : undefined;
+      }
+      return null;
+    };
+
+    const agents = Array.from(this.agentLane.entries()).map(([id, lane]) => ({ id, lane, x: this.xOf(id), color: this.agentColor(id), label: this.label(id) }));
+    return agents.map(agent => {
+      // Lifeline spans only the agent's actual vertex/activity rows (ends at last participation, e.g. Pam at her final response).
+      const indices: number[] = [];
+      this.nodes.forEach((n, i) => {
+        const actor = n.sender_agent_id === 'user' ? n.receiver_agent_id : n.sender_agent_id; // root user->agent counts at agent
+        if (n.receiver_agent_id === agent.id || actor === agent.id) indices.push(i);
+      });
+      if (!indices.length) return { ...agent, segments: [] as LifelineSegment[] };
+      const yStart = this.cy[Math.min(...indices)] || 0;
+      const yEnd = this.cy[Math.max(...indices)] || yStart;
+
+      // waiting intervals: agent delegates (request out) until the fulfilling response comes back
+      const waits: Array<{ a: number; b: number }> = [];
+      this.nodes.forEach((n, i) => {
+        if (n.sender_agent_id !== agent.id) return; // request sent by agent
+        if (n.receiver_agent_id === agent.id) return;
+        const fulfilled = findFulfilledNode(n); // not a response fulfilling a prior request => delegation/request
+        if (fulfilled) return;
+        // find response that fulfills this request
+        for (let j = i + 1; j < this.nodes.length; j++) {
+          const r = this.nodes[j];
+          if (r.receiver_agent_id !== agent.id) continue;
+          const f = findFulfilledNode(r);
+          if (f && f.id === n.id) { waits.push({ a: this.cy[i] || 0, b: this.cy[j] || 0 }); break; }
+        }
+      });
+
+      const boundaries = new Set<number>([yStart, yEnd]);
+      waits.forEach(w => { if (w.a >= yStart && w.a <= yEnd) boundaries.add(w.a); if (w.b >= yStart && w.b <= yEnd) boundaries.add(w.b); });
+      const ys = Array.from(boundaries).sort((a, b) => a - b);
+      const segments: LifelineSegment[] = [];
+      for (let k = 0; k < ys.length - 1; k++) {
+        const a = ys[k], b = ys[k + 1];
+        if (b <= a) continue;
+        const mid = (a + b) / 2;
+        const waiting = waits.some(w => mid > w.a && mid < w.b);
+        segments.push({ y1: a, y2: b, waiting, key: `${agent.id}:${a}-${b}:${waiting ? 'w' : 's'}` });
+      }
+      if (!segments.length) segments.push({ y1: yStart, y2: yEnd, waiting: false, key: `${agent.id}:solid` });
+      return { ...agent, segments };
+    }).filter(l => l.segments.length > 0);
+  }
 
   buildEdges(): Edge[] {
     const idx = new Map<number, number>();
@@ -164,29 +222,46 @@ export class LineageComponent implements OnChanges, AfterViewInit, OnDestroy {
       }
     });
 
-    const resolveAttachParent = (n: GraphNode): GraphNode | null => {
-      const start = n.parent_task_id != null ? idx.get(n.parent_task_id) : undefined;
-      if (start == null) return null;
-      if (n.isReturn || n.parent_task_callback) {
-        let curIdx: number | undefined = start;
-        const seen = new Set<number>();
-        while (curIdx != null && !seen.has(curIdx)) {
-          seen.add(curIdx);
-          const a = this.nodes[curIdx];
-          if (a.sender_agent_id === n.receiver_agent_id && a.receiver_agent_id === n.sender_agent_id) return a;
-          curIdx = a.parent_task_id != null ? idx.get(a.parent_task_id) : undefined;
-        }
+    const findFulfilledNode = (n: GraphNode): GraphNode | null => {
+      let curIdx = n.parent_task_id != null ? idx.get(n.parent_task_id) : undefined;
+      const seen = new Set<number>();
+      while (curIdx != null && !seen.has(curIdx)) {
+        seen.add(curIdx);
+        const a = this.nodes[curIdx];
+        // request: sender=requester, receiver=executor -> response: sender=executor, receiver=requester
+        if (a.sender_agent_id === n.receiver_agent_id && a.receiver_agent_id === n.sender_agent_id) return a;
+        curIdx = a.parent_task_id != null ? idx.get(a.parent_task_id) : undefined;
       }
-      return this.nodes[start] || null;
+      return null;
     };
 
     this.nodes.forEach((n, i) => {
-      if (!n.parent_task_id) return;
-      const parent = resolveAttachParent(n);
-      if (!parent) return;
-      const pi = idx.get(parent.id as number); if (pi == null) return;
-      const x1 = this.cx(parent), y1 = this.cy[pi] || 0;
-      const x2 = this.cx(n), y2 = this.cy[i] || 0;
+      if (n.parent_task_id == null) return;
+      const fulfilled = findFulfilledNode(n);
+      const isResponseEdge = !!fulfilled;
+      let x1: number, y1: number, x2: number, y2: number;
+      if (isResponseEdge && fulfilled) {
+        const fi = idx.get(fulfilled.id as number); if (fi == null) return;
+        // response/progress/final: default fulfilled request vertex -> response vertex
+        x1 = this.cx(fulfilled); y1 = this.cy[fi] || 0;
+        x2 = this.cx(n); y2 = this.cy[i] || 0;
+        // continuity: if this responder received a sub-response after the fulfilled request, chain from that last reception vertex
+        // (e.g. Bob final #6 chains from Pam's response #5, not from #2)
+        for (let j = i - 1; j > fi; j--) {
+          const prev = this.nodes[j];
+          if (prev.receiver_agent_id === n.sender_agent_id) {
+            const prevFulfilled = findFulfilledNode(prev);
+            if (prevFulfilled) { x1 = this.cx(prev); y1 = this.cy[j] || 0; }
+            break;
+          }
+        }
+      } else {
+        // delegation/request: requester(sender) at parent row -> executor(receiver) at this row
+        const pi = idx.get(n.parent_task_id as number);
+        if (pi == null) return;
+        x1 = this.xOf(n.sender_agent_id || 'user'); y1 = this.cy[pi] || 0;
+        x2 = this.xOf(n.receiver_agent_id || 'user'); y2 = this.cy[i] || 0;
+      }
       const my = (y1 + y2) / 2;
       const d = `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
       let dashed = false;
@@ -194,7 +269,8 @@ export class LineageComponent implements OnChanges, AfterViewInit, OnDestroy {
       else if (n.isFinal) dashed = false;
       else dashed = n.task_flow === 'direct' ? !isClosed(n.id!) : false;
       const kind: Edge['kind'] = n.isProgress ? (dashed ? 'return-progress' : 'return-resolved-progress') : (n.isFinal ? 'return-final' : 'down');
-      edges.push({ x1, y1, x2, y2, color: n.color, kind, d, dashed, key: `${parent.id}->${n.id}:${kind}:${dashed ? 'd' : 's'}` });
+      const edgeColor = this.agentColor(n.sender_agent_id || 'user');
+      edges.push({ x1, y1, x2, y2, color: edgeColor, kind, d, dashed, key: `${n.parent_task_id}->${n.id}:${kind}:${dashed ? 'd' : 's'}` });
     });
 
     if (this.nodes.length > 1) {

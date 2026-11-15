@@ -10,7 +10,16 @@
     <span class="leg key"><i class="line resolved-progress"></i>progreso reportado + resuelto</span>
   </div>
   <div class="timeline">
-    <svg class="graph" *ngIf="edges.length" [attr.width]="graphW" [attr.height]="graphH">
+    <svg class="graph" *ngIf="edges.length || lifelines.length" [attr.width]="graphW" [attr.height]="graphH">
+      <g class="lifelines" *ngIf="lifelines.length">
+        <ng-container *ngFor="let l of lifelines">
+          <line *ngFor="let s of l.segments"
+                class="lifeline"
+                [class.waiting]="s.waiting"
+                [attr.x1]="l.x" [attr.y1]="s.y1" [attr.x2]="l.x" [attr.y2]="s.y2"
+                [attr.stroke]="l.color" />
+        </ng-container>
+      </g>
       <path *ngFor="let e of edges; trackBy: trackEdge"
             [attr.d]="e.d"
             [attr.stroke]="e.color"

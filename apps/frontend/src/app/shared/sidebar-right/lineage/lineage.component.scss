@@ -35,5 +35,5 @@
 .ftag.final{border-style:solid;border-color:#22c55e;color:#22c55e;background:rgba(34,197,94,.08)}
 .task-route { font-size: 12px; color: var(--text-secondary); margin: 2px 0; font-family: var(--font-mono); }
 .parent { font-size: 10px; color: var(--text-muted); }
-.payload { font-size: 12px; color: var(--text-secondary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; cursor: help; }
+.payload { font-size: 12px; color: var(--text-secondary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; cursor: help; }
 .empty { font-size: 12px; color: var(--text-muted); padding: 8px 0; }
