@@ -313,6 +313,8 @@ export class AgentRunnerService implements OnModuleInit {
     let runId = randomUUID();
     const startedAt = Date.now();
     let finalized = false;
+    let sessionForToolLoopAbort: any = null;
+    let extensionSessionStarted = false;
     const finalizeOnce = async (fn: () => Promise<void>) => { if (finalized) return; finalized = true; await fn(); };
     try {
       if ((task as any).task_flow === 'delegation_progress') {
@@ -384,7 +386,6 @@ export class AgentRunnerService implements OnModuleInit {
       let delegatedProgressSummary = '';
       let delegationPlannedThisRun = false;
       let activePlanRef: number | null = (task as any).plan_ref ?? null;
-      let sessionForToolLoopAbort: any = null;
       let forcedToolLoopStop: string | null = null;
       let lastBlockedDelegationSignature = '';
       let repeatedBlockedDelegationCount = 0;
@@ -804,7 +805,8 @@ export class AgentRunnerService implements OnModuleInit {
         this.trace.record({ runId, agentId: agent.id, eventType: 'memory_state', taskId: task.id, workspaceId,
           eventData: { effective: memoryState.effective, reason: memoryState.reason, globalEnabled: memoryState.globalEnabled, configured: memoryState.configured, available: memoryState.available, workspaceEnabled: memoryState.workspaceEnabled, agentEnabled: memoryState.agentEnabled } }).catch(() => {});
       }
-      const systemPrompt = await this.promptBuilder.buildSystem({ agent, team: availableAgents, memoryEffective });
+      const memoryToolNames = memoryEffective ? ['memory_query', 'memory_trace', 'mcp__nexo_palace__memory_query', 'mcp__nexo_palace__memory_trace', 'mcp__nexo_palace__memory_status', 'mcp__nexo_palace__memory_path', 'mcp__nexo_palace__memory_map', 'mcp__nexo_palace__memory_drift', 'mcp__nexo_palace__memory_record_decision'] : [];
+      const systemPrompt = await this.promptBuilder.buildSystem({ agent, team: availableAgents, memoryEffective, memoryToolNames });
       const systemPromptHash = createHash('sha1').update(String(systemPrompt || '')).digest('hex');
       const hasInjectedContext = !!String(systemPrompt || '').trim();
       // Skip reapplying/persisting an unchanged system prompt on resumed sessions (Pi session already has context).
@@ -883,27 +885,28 @@ export class AgentRunnerService implements OnModuleInit {
       let agentDir = '';
       try { agentDir = await this.appSettings.resolvePiAgentDir(); } catch { agentDir = path.join(process.cwd(), 'data', 'pi-agent'); }
       try {
+        // Expose all Pi-configured MCP/extensions (including memory servers) to every agent/session.
         const memoryMcpOptions = this.memoryService
-          ? await this.memoryService.resourceLoaderOptions(memoryEffective && !terminalWorkerResult)
+          ? await this.memoryService.resourceLoaderOptions(true)
           : {};
         resourceLoader = new (DefaultResourceLoader as any)({ cwd, agentDir, systemPrompt, ...memoryMcpOptions });
+        // createAgentSession does not reload a caller-supplied ResourceLoader. Load extensions
+        // here so Pi's MCP extension can read Pi's mcp.json and register its session tools.
+        await resourceLoader.reload();
       } catch (e) {
         console.warn('[AgentRunner] Pi MCP resource loader failed; disabling MCP for this session to preserve memory preferences.', e);
         try {
           resourceLoader = new (DefaultResourceLoader as any)({ cwd, agentDir, systemPrompt, disabledBuiltinExtensions: ['mcp'] });
+          await resourceLoader.reload();
         } catch (fallbackError) {
           console.warn('[AgentRunner] DefaultResourceLoader unavailable; using prompt injection', fallbackError);
         }
       }
       console.log(`[AgentRunner] prompt built (sys=${systemPrompt.length}, task=${promptText.length}), creating AgentSession model=${resolved.raw}...`);
-      // Progress cannot plan; an active plan already defines the route. A RESULT without a
-      // plan may need to start a new multi-agent subchain, for any role, so retain the planner.
+      // Expose all Pi tools (built-in + custom + configured MCP/extensions) to every agent/session.
       const planningAllowed = canPlanDelegation({ flow: flowForTools, planState: activePlan?.state, explicitlyAddressedRecipient: !!explicitChiefRecipient });
       const sessionTools = allowedToolsForTaskFlow(flowForTools, agent.role, planningAllowed, terminalWorkerResult);
-      const customTools = [
-        ...(sessionTools.includes('delegate_task') ? [delegateTaskTool] : []),
-        ...(sessionTools.includes('plan_delegation') ? [planDelegationTool] : []),
-      ];
+      const customTools = [delegateTaskTool, planDelegationTool];
       this.trace.record({ runId, agentId: agent.id, eventType: 'session_tools_configured', taskId: task.id, workspaceId,
         eventData: { taskFlow: flowForTools, role: agent.role, tools: sessionTools, customTools: customTools.map((tool: any) => tool.name), planningAllowed, activePlanState: activePlan?.state ?? null, terminalWorkerResult, memoryEffective } }).catch(() => {});
       const sessionOpts: any = { sessionManager, cwd, tools: sessionTools,
@@ -912,6 +915,11 @@ export class AgentRunnerService implements OnModuleInit {
       if (resourceLoader) sessionOpts.resourceLoader = resourceLoader;
       const { session, modelFallbackMessage } = await createAgentSession(sessionOpts) as any;
       sessionForToolLoopAbort = session;
+      // SDK-created sessions do not start extensions until the host binds them.
+      // Bind in non-interactive RPC mode so Pi's configured MCP servers (including
+      // optional memory) connect before the first prompt/tool discovery.
+      await session.bindExtensions({ mode: 'rpc' });
+      extensionSessionStarted = true;
       if (modelFallbackMessage) {
         console.warn(`[AgentRunner] model fallback agent=${agent.id} task=${task.id}: ${modelFallbackMessage}`);
         agentEventEmitter.emit('agent:run:warning', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'model_fallback', message: modelFallbackMessage, emittedAt: Date.now() });
@@ -1001,11 +1009,42 @@ export class AgentRunnerService implements OnModuleInit {
       };
 
       let memoryRuntimeChecked = false;
+      let mcpToolsActivated = false;
+      const activateLoadedMcpTools = (force = false) => {
+        if ((mcpToolsActivated && !force) || typeof (session as any).getAllTools !== 'function') return;
+        try {
+          const allNames = (session as any).getAllTools().map((tool: any) => String(tool?.name || '')).filter(Boolean);
+          if (!allNames.length) return;
+          // The Pi SDK allowlist set at session creation (_allowedTools from opts.tools) blocks
+          // direct MCP tools from activation (_isActivatable), so they never reach the model even
+          // when registered by extensions. Clear the allowlist and activate the full registered set
+          // so every Pi/MCP tool is exposed to the agent session/model.
+          try { if ('_allowedTools' in session) (session as any)._allowedTools = undefined; } catch {}
+          if (typeof (session as any)._setActiveTools === 'function') (session as any)._setActiveTools(allNames);
+          else if (typeof (session as any).setActiveToolsByName === 'function') (session as any).setActiveToolsByName(allNames);
+          mcpToolsActivated = true;
+          // Keep the effective system prompt in sync (memory block/tool names) for this session.
+          if (memoryEffective) {
+            try { this.applySystemPrompt(session, systemPrompt); } catch {}
+          }
+          const activeTools = typeof (session as any).getActiveToolNames === 'function' ? (session as any).getActiveToolNames() : allNames;
+          this.trace.record({ runId, agentId: agent.id, eventType: 'session_tools_activated', taskId: task.id, workspaceId,
+            eventData: { activeTools, allTools: allNames } }).catch(() => {});
+        } catch (e) {
+          console.warn('[AgentRunner] failed to activate loaded MCP/session tools', e);
+        }
+      };
       const unsubscribe = session.subscribe((event: any) => {
+        // Activate all Pi/MCP tools (clearing SDK allowlist) so direct MCP tools reach the model.
+        // Run on early lifecycle events; MCP direct tools can finish registering around these points.
+        if (event?.type === 'before_agent_start' || event?.type === 'agent_start' || event?.type === 'turn_start') {
+          activateLoadedMcpTools(event?.type === 'turn_start' || event?.type === 'agent_start');
+        }
         // Pi waits for direct MCP tools in before_agent_start. Inspect after that wait, at agent_start,
         // instead of mistaking the initial background connection window for a failure.
-        if (!memoryRuntimeChecked && memoryEffective && this.memoryService && event.type === 'agent_start') {
+        if (!memoryRuntimeChecked && this.memoryService && event.type === 'agent_start') {
           memoryRuntimeChecked = true;
+          activateLoadedMcpTools(true);
           const toolNames = typeof session?.getAllTools === 'function'
             ? session.getAllTools().map((tool: any) => String(tool?.name || ''))
             : [];
@@ -1359,6 +1398,20 @@ export class AgentRunnerService implements OnModuleInit {
       agentEventEmitter.emit('agent:run:error', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'runner_error', message: String(error?.message || error), emittedAt: Date.now() });
       agentEventEmitter.emit('agent:run:finished', { agentId: agent.id, workspaceId, taskId: task.id, runId, outcome: 'error', errorMessage: String(error?.message || error), willRetry: false, aborted: false, emittedAt: Date.now() });
     } finally {
+      // AgentRunner owns a short-lived SDK session per task. Shut down extension
+      // handlers even when prompt setup or execution fails, then release listeners.
+      try {
+        const session = sessionForToolLoopAbort;
+        if (session) {
+          const extensionRunner = (session as any).extensionRunner;
+          if (extensionSessionStarted && extensionRunner?.hasHandlers?.('session_shutdown')) {
+            await extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+          }
+          session.dispose?.();
+        }
+      } catch (e) {
+        console.warn('[AgentRunner] failed to close Pi session extensions', e);
+      }
       this.currentTaskByAgent.delete(agent.id);
       const a = await this.agentRepository.get(agent.id).catch(() => null);
       if (a) { a.status = AgentStatus.IDLE; await this.agentRepository.update(a).catch(() => {}); }

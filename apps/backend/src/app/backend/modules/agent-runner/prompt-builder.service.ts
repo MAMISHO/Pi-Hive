@@ -50,7 +50,7 @@ export class PromptBuilderService {
     return `[SYSTEM NUDGE · reintento automático]\nTu turno anterior se cortó por límite de longitud SIN completar ninguna acción ni respuesta. Responde AHORA de forma concisa y directa, en 1-2 líneas: ejecuta tu primer acto (plan_delegation si la tarea requiere cadena, o delegate_task al responsable directo, o entrega el resultado solicitado). NO repitas razonamiento ni expliques lo que vas a hacer, actúa.`;
   }
 
-  async buildSystem(params: { agent: IAgent; team: IAgent[]; memoryEffective?: boolean }): Promise<string> {
+  async buildSystem(params: { agent: IAgent; team: IAgent[]; memoryEffective?: boolean; memoryToolNames?: string[] }): Promise<string> {
     const { agent, team } = params;
     if ((agent as any).inject_context === false) return '';
     const workspace = agent.workspace_id ? await this.workspaceRepo.get(agent.workspace_id) : null;
@@ -86,8 +86,12 @@ export class PromptBuilderService {
 
     // Single canonical team section (avoid duplicating roster inside role templates/custom prompts)
     const equipoBlock = `[EQUIPO · otros agentes activos del workspace; nicknames exactos para delegar; tú eres "${agent.nickname}"]\n${teamRoster}`;
+    const memoryToolNames = Array.isArray((params as any).memoryToolNames) ? (params as any).memoryToolNames.filter(Boolean) : [];
+    const memoryToolsHint = memoryToolNames.length
+      ? ` Tools MCP disponibles: ${memoryToolNames.join(', ')}.`
+      : ' Si están disponibles, usa las tools MCP de memoria del proyecto (p.ej. memory_query/memory_trace o sus nombres mcp__nexo_palace__*).';
     const memoryBlock = (params as any).memoryEffective
-      ? `\n[MEMORIA EXTERNA · Nexo-Palace]\n- Consulta la memoria mediante las tools MCP de Pi solo cuando aporte contexto necesario para la tarea.\n- La memoria es informativa; no sustituye el estado persistido del pipeline, gates, aprobaciones humanas ni las tools del harness.\n- Formula consultas breves y específicas y usa solo los resultados necesarios.`
+      ? `\n[MEMORIA EXTERNA · Nexo-Palace]\n- Consulta la memoria mediante las tools MCP de Pi solo cuando aporte contexto necesario para la tarea.${memoryToolsHint}\n- La memoria es informativa; no sustituye el estado persistido del pipeline, gates, aprobaciones humanas ni las tools del harness.\n- Formula consultas breves y específicas y usa solo los resultados necesarios.`
       : '';
 
     return [

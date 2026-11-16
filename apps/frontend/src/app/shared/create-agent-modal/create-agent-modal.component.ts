@@ -226,7 +226,7 @@ export class CreateAgentModalComponent implements OnInit {
         memory_enabled: !!this.memoryEnabled,
       };
       this.agentService.update(this._agent.id, patch).subscribe({
-        next: (saved) => { this.updated.emit(saved || patch); this.onHide(); },
+        next: (saved) => { this.updated.emit(saved || patch); this.agentService.notifyAgentsChanged(); this.onHide(); },
         error: (e) => { this.error = e?.error?.message || e?.message || 'Error guardando agente'; },
       });
       return;
@@ -239,7 +239,7 @@ export class CreateAgentModalComponent implements OnInit {
       memory_enabled: !!this.memoryEnabled,
     };
     this.agentService.create(agent).subscribe({
-      next: (created) => { this.created.emit(created); this.onHide(); },
+      next: (created) => { this.created.emit(created); this.agentService.notifyAgentsChanged(); this.onHide(); },
       error: (e) => { this.error = e?.error?.message || e?.message || 'Error creando agente'; },
     });
   }

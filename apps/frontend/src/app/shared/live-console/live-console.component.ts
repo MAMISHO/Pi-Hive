@@ -4,7 +4,7 @@ import { ButtonModule } from 'primeng/button';
 import { BadgeModule } from 'primeng/badge';
 import { WebsocketService } from '../../core/services/websocket.service';
 import { AgentSelectionService } from '../../core/services/agent-selection.service';
-import { LiveStreamCacheService, AgentLiveBuffer } from '../../core/services/live-stream-cache.service';
+import { LiveStreamCacheService, AgentLiveBuffer, LiveLogEntry } from '../../core/services/live-stream-cache.service';
 import { Subscription } from 'rxjs';
 
 @Component({
@@ -26,20 +26,26 @@ import { Subscription } from 'rxjs';
       </div>
       @if (!collapsed) {
         <div class="console-block">
-          <div class="thinking" [class.collapsed]="thinkingCollapsed" *ngIf="thinkingBuffer || (!textBuffer)">
-            <div class="thinking-label">thinking</div>
-            <pre class="thinking-content">{{ thinkingBuffer || 'Waiting for output…' }}</pre>
-          </div>
-          <div class="output" *ngIf="textBuffer">
-            <div class="output-label">output</div>
-            <pre class="output-content">{{ textBuffer }}</pre>
-          </div>
-          @if (tools.length) {
-            <div class="tools">
-              @for (tool of tools; track $index) {
-                <span class="tool-badge"><i class="pi pi-wrench"></i> {{ tool.toolName }}</span>
-              }
-            </div>
+          @if (!log.length) {
+            <pre class="thinking-content muted">Waiting for output…</pre>
+          }
+          @for (e of log; track $index) {
+            @if (e.kind === 'thinking') {
+              <div class="log-entry thinking" [class.collapsed]="thinkingCollapsed">
+                <div class="entry-label think">thinking</div>
+                <pre class="thinking-content">{{ e.text }}</pre>
+              </div>
+            } @else if (e.kind === 'text') {
+              <div class="log-entry output">
+                <div class="entry-label">output</div>
+                <pre class="output-content">{{ e.text }}</pre>
+              </div>
+            } @else if (e.kind === 'tool') {
+              <div class="log-entry tool">
+                <div class="tool-head"><span class="tool-badge"><i class="pi pi-wrench"></i> {{ e.toolName || 'tool' }}</span><span class="tool-phase">{{ e.phase || '' }}</span></div>
+                <pre class="tool-detail">{{ formatToolDetail(e) }}</pre>
+              </div>
+            }
           }
         </div>
       }
@@ -71,14 +77,21 @@ import { Subscription } from 'rxjs';
     @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(1.5); } }
     @media (prefers-reduced-motion: reduce) { .pulse-badge, .dot.active, .title.live-active .title-label { animation: none; } .title.live-active .title-label { color: var(--accent-blue); -webkit-text-fill-color: currentColor; background: none; } }
     .actions { display: flex; gap: 4px; }
-    .console-block { background: var(--bg-console); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 10px; max-height: 140px; overflow-y: auto; transition: border-color var(--transition-normal), box-shadow var(--transition-normal); }
-    .thinking-label, .output-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
-    .thinking-content, .output-content { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 12px; line-height: 1.55; color: #c9d1d9; }
+    .console-block { background: var(--bg-console); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 10px; max-height: 240px; overflow-y: auto; transition: border-color var(--transition-normal), box-shadow var(--transition-normal); display:flex; flex-direction:column; gap:8px; }
+    .log-entry { border-left: 2px solid var(--border-color); padding-left: 8px; }
+    .log-entry.thinking { border-color: rgba(188,140,255,0.5); }
+    .log-entry.output { border-color: rgba(88,166,255,0.4); }
+    .log-entry.tool { border-color: rgba(210,153,34,0.55); background: rgba(210,153,34,0.04); border-radius: 4px; padding: 6px 8px; }
+    .entry-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 2px; }
+    .entry-label.think { color: #d4b3ff; }
+    .thinking-content, .output-content, .tool-detail { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 12px; line-height: 1.55; color: #c9d1d9; }
     .thinking.collapsed .thinking-content { display: none; }
-    .output { margin-top: 6px; }
     .output-content { color: #e6edf3; }
-    .tools { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
+    .tool-head { display:flex; align-items:center; gap:8px; margin-bottom:4px; }
     .tool-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: var(--radius-sm); background: var(--bg-tertiary); border: 1px solid var(--border-color); font-family: var(--font-mono); font-size: 12px; color: var(--accent-blue); }
+    .tool-phase { font-size: 10px; color: var(--text-muted); text-transform: uppercase; }
+    .tool-detail { color: #ffe6a3; font-size: 11.5px; }
+    .muted { color: var(--text-muted); }
   `],
 })
 export class LiveConsoleComponent implements OnInit, OnDestroy {
@@ -86,9 +99,7 @@ export class LiveConsoleComponent implements OnInit, OnDestroy {
   @Input() collapsed: boolean = false;
   @Output() collapsedChange = new EventEmitter<boolean>();
 
-  textBuffer = '';
-  thinkingBuffer = '';
-  tools: any[] = [];
+  log: LiveLogEntry[] = [];
   thinkingCollapsed = false;
   private subs: Subscription[] = [];
 
@@ -96,13 +107,40 @@ export class LiveConsoleComponent implements OnInit, OnDestroy {
 
   hasActivity(): boolean {
     const b = this.cache.get(this.selectedAgentId);
-    return !!b.active || !!this.textBuffer || !!this.thinkingBuffer || this.tools.length > 0;
+    return !!b.active || (b.log && b.log.length > 0);
   }
   toggleCollapsed(v: boolean): void { this.collapsed = v; this.collapsedChange.emit(v); }
 
   private sync() {
     const b: AgentLiveBuffer = this.cache.get(this.selectedAgentId);
-    this.textBuffer = b.text; this.thinkingBuffer = b.thinking; this.tools = b.tools;
+    this.log = b.log || [];
+  }
+
+  formatToolDetail(e: LiveLogEntry): string {
+    const name = e.toolName || 'tool';
+    const args = e.args;
+    const summary = e.resultSummary ? `\n→ ${String(e.resultSummary).slice(0, 240)}` : '';
+    if (args == null) return `${name}${summary}`;
+    try {
+      const a = typeof args === 'string' ? JSON.parse(args) : args;
+      if (a && typeof a === 'object') {
+        if (a.command) return `$ ${String(a.command).slice(0, 400)}${a.cwd ? `\n(cwd: ${a.cwd})` : ''}${summary}`;
+        if (a.path) return `path: ${a.path}${summary}`;
+        if (a.file_path || a.filePath) return `file: ${a.file_path || a.filePath}${summary}`;
+        if (a.query) return `query: ${String(a.query).slice(0, 300)}${summary}`;
+        if (a.url) return `url: ${a.url}${summary}`;
+        const keys = Object.keys(a).slice(0, 6);
+        if (keys.length) return keys.map(k => `${k}: ${this.compactVal(a[k])}`).join('\n') + summary;
+      }
+      return String(args).slice(0, 400) + summary;
+    } catch {
+      return String(args).slice(0, 400) + summary;
+    }
+  }
+  private compactVal(v: any): string {
+    if (v == null) return String(v);
+    if (typeof v === 'string') return v.length > 120 ? v.slice(0, 120) + '…' : v;
+    try { const s = JSON.stringify(v); return s.length > 120 ? s.slice(0, 120) + '…' : s; } catch { return String(v); }
   }
 
   ngOnInit(): void {

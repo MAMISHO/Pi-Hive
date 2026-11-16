@@ -104,6 +104,11 @@ export class NexoPalaceMemoryService {
     };
   }
 
+  private isMemoryFlagEnabled(value: any): boolean {
+    // SQLite/Sequelize may return booleans as 1/0 or "1"/"0".
+    return value === true || value === 1 || value === '1';
+  }
+
   async canDefaultWorkspaceMemoryOnCreate(): Promise<boolean> {
     const status = await this.getSanitizedStatus();
     return status.globalEnabled && status.configured && status.available;
@@ -119,8 +124,8 @@ export class NexoPalaceMemoryService {
       this.connectionState = 'unknown';
     }
     const ws = workspace || (this.workspaceRepo && agent.workspace_id ? await this.workspaceRepo.get(agent.workspace_id) : null);
-    const workspaceEnabled = (ws as any)?.memory_enabled === true;
-    const agentEnabled = (agent as any)?.memory_enabled === true;
+    const workspaceEnabled = this.isMemoryFlagEnabled((ws as any)?.memory_enabled);
+    const agentEnabled = this.isMemoryFlagEnabled((agent as any)?.memory_enabled);
     const configured = !!server;
     const effective = globalEnabled && configured && this.connectionState !== 'unavailable' && workspaceEnabled && agentEnabled;
     let reason = 'ok';
@@ -148,7 +153,7 @@ export class NexoPalaceMemoryService {
 
   async decorateWorkspace<T extends Record<string, any>>(ws: T): Promise<any> {
     const status = await this.getSanitizedStatus();
-    const preference = (ws as any).memory_enabled === true;
+    const preference = this.isMemoryFlagEnabled((ws as any).memory_enabled);
     return {
       ...ws,
       memory_enabled: (ws as any).memory_enabled ?? null,
@@ -163,8 +168,8 @@ export class NexoPalaceMemoryService {
   async decorateAgent(agent: IAgent, workspace?: IWorkspace | null): Promise<any> {
     const ws = workspace || (this.workspaceRepo && agent.workspace_id ? await this.workspaceRepo.get(agent.workspace_id) : null);
     const status = await this.getSanitizedStatus();
-    const workspacePreference = (ws as any)?.memory_enabled === true;
-    const preference = (agent as any)?.memory_enabled === true;
+    const workspacePreference = this.isMemoryFlagEnabled((ws as any)?.memory_enabled);
+    const preference = this.isMemoryFlagEnabled((agent as any)?.memory_enabled);
     return {
       ...agent,
       memory_enabled: (agent as any)?.memory_enabled ?? null,
@@ -185,21 +190,16 @@ export class NexoPalaceMemoryService {
   async resourceLoaderOptions(memoryEnabled: boolean) {
     const agentDir = await this.settings.resolvePiAgentDir();
     const loadMcpConfig = await this.getPiMcpConfigLoader();
+    // Expose all Pi-configured MCP servers (including memory) so every agent/session can use them.
     const extension = createMcpExtension({
-      startupWaitMs: memoryEnabled ? 5000 : undefined,
+      startupWaitMs: 5000,
       loadConfig: (ctx: any) => {
         const config = loadMcpConfig({ agentDir, cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
-        if (memoryEnabled) {
-          return {
-            ...config,
-            servers: config.servers.map((entry: any) => isMemoryServer(entry)
-              ? { ...entry, config: { ...entry.config, exposure: 'direct', toolExposure: { '*': 'hidden', memory_query: 'direct', memory_trace: 'direct' } } }
-              : entry),
-          };
-        }
         return {
           ...config,
-          servers: config.servers.filter((entry: any) => !isMemoryServer(entry)),
+          servers: config.servers.map((entry: any) => isMemoryServer(entry)
+            ? { ...entry, config: { ...entry.config, exposure: 'direct', toolExposure: { '*': 'direct', memory_query: 'direct', memory_trace: 'direct', memory_status: 'direct', memory_path: 'direct', memory_map: 'direct', memory_drift: 'direct', memory_record_decision: 'direct' } } }
+            : entry),
         };
       },
     });

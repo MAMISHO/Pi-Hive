@@ -51,7 +51,7 @@ describe('NexoPalaceMemoryService', () => {
     expect(status.configured).toBe(false);
   });
 
-  it('filters only the memory MCP from a session when its preference is off', async () => {
+  it('keeps all Pi MCP servers available in sessions (including memory) regardless of preference flag', async () => {
     await writePiConfig({
       'nexo-palace': { command: 'npx' },
       docs: { command: 'node', args: ['docs-server'] },
@@ -60,17 +60,17 @@ describe('NexoPalaceMemoryService', () => {
     expect(options.extensionFactories.map((factory: any) => factory.name)).toEqual(['codemode', 'tool-search', 'mcp']);
     const ctx = { cwd: '/tmp/workspace', isProjectTrusted: () => false };
     const config = (options.extensionFactories[2] as any).loadConfig(ctx);
-    expect(config.servers.map((server: any) => server.name)).toEqual(['docs']);
+    expect(config.servers.map((server: any) => server.name)).toEqual(['nexo-palace', 'docs']);
   });
 
-  it('keeps Pi MCP servers in a session when memory is enabled', async () => {
+  it('keeps Pi MCP servers in a session and exposes memory tools directly', async () => {
     await writePiConfig({ 'nexo-palace': { command: 'npx' }, docs: { command: 'node' } });
     const options = await service.resourceLoaderOptions(true);
     const config = (options.extensionFactories[2] as any).loadConfig({ cwd: '/tmp/workspace', isProjectTrusted: () => false });
     expect(config.servers.map((server: any) => server.name)).toEqual(['nexo-palace', 'docs']);
     const memoryEntry = config.servers.find((server: any) => server.name === 'nexo-palace');
     expect(memoryEntry.config.exposure).toBe('direct');
-    expect(memoryEntry.config.toolExposure).toEqual({ '*': 'hidden', memory_query: 'direct', memory_trace: 'direct' });
+    expect(memoryEntry.config.toolExposure).toEqual({ '*': 'direct', memory_query: 'direct', memory_trace: 'direct', memory_status: 'direct', memory_path: 'direct', memory_map: 'direct', memory_drift: 'direct', memory_record_decision: 'direct' });
   });
 
   it('propagates Pi session availability without changing the global preference', async () => {

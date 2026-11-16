@@ -140,9 +140,13 @@ export class AgentController {
     @Optional() @Inject(NexoPalaceMemoryService) private readonly memory?: NexoPalaceMemoryService,
   ) {}
 
+  private isMemoryFlagEnabled(value: any): boolean {
+    return value === true || value === 1 || value === '1';
+  }
+
   private async decorate(agent: IAgent | null): Promise<any> {
     if (!agent) return agent;
-    if (!this.memory) return { ...agent, memoryPreference: (agent as any).memory_enabled === true, memoryEffective: false };
+    if (!this.memory) return { ...agent, memoryPreference: this.isMemoryFlagEnabled((agent as any).memory_enabled), memoryEffective: false };
     return this.memory.decorateAgent(agent);
   }
 

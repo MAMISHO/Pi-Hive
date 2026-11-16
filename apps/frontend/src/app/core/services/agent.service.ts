@@ -1,13 +1,20 @@
 import { Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { Observable } from 'rxjs';
+import { Observable, Subject } from 'rxjs';
 import { IAgent } from '../models/agent.model';
 
 export interface ModelProvider { provider: string; models: string[]; }
 const BASE_URL = 'http://localhost:8090';
 @Injectable({ providedIn: 'root' })
 export class AgentService {
+  private readonly agentChangedSubject = new Subject<void>();
+  /** Emite cuando agentes pueden haber cambiado (create/update/delete/restore) para refresco reactivo en UI. */
+  readonly agentChanged$ = this.agentChangedSubject.asObservable();
+
   constructor(private http: HttpClient) {}
+
+  notifyAgentsChanged(): void { this.agentChangedSubject.next(); }
+
   getAll(): Observable<IAgent[]> { return this.http.get<IAgent[]>(`${BASE_URL}/agents`); }
   getByWorkspace(workspaceId: string): Observable<IAgent[]> { return this.http.get<IAgent[]>(`${BASE_URL}/workspaces/${encodeURIComponent(workspaceId)}/agents`); }
   getAllAdmin(): Observable<IAgent[]> { return this.http.get<IAgent[]>(`${BASE_URL}/agents/admin/all`); }

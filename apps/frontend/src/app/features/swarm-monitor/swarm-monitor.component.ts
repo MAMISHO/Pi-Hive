@@ -67,18 +67,14 @@ import { effortFull, effortShort, normalizeEffort } from '../../core/utils/think
                     <pre class="ev-body muted">Contenido intermedio plegado (no cargado). Se obtendrá al desplegar.</pre>
                   } @else {
                     <div class="group-children">
-                      @for (child of (ev.children || []); track child.id ?? $index) {
-                        <div class="group-child" [class.kind-thinking]="child.kind==='thinking'" [class.kind-tool]="child.kind==='tool_group' || child.kind==='tool_call' || child.kind==='tool_result'">
-                          <div class="group-child-meta">
-                            <span class="kchip think" *ngIf="child.kind==='thinking'">THINKING</span>
-                            <span class="kchip tool" *ngIf="child.kind!=='thinking'">TOOL</span>
-                          </div>
+                      @for (child of displayChildren(ev); track child.id ?? child.toolCallId ?? $index) {
+                        <div class="group-child" [class.kind-thinking]="child.kind==='thinking'" [class.kind-tool]="child.kind!=='thinking'">
                           @if (child.kind === 'thinking') {
+                            <div class="inline-title">Razonamiento</div>
                             <pre class="ev-body">{{ thinkingText(child.content) }}</pre>
-                          } @else if (child.kind === 'tool_group') {
-                            <pre class="ev-body">{{ toolGroupText(child.content) }}</pre>
                           } @else {
-                            <pre class="ev-body">{{ toolText(child.content) }}</pre>
+                            <div class="inline-title">{{ toolEventTitle(child) }}</div>
+                            <pre class="ev-body tool-body">{{ toolText(child.content) }}</pre>
                           }
                         </div>
                       } @empty { <pre class="ev-body muted">Sin acciones intermedias.</pre> }
@@ -86,17 +82,15 @@ import { effortFull, effortShort, normalizeEffort } from '../../core/utils/think
                   }
                 </details>
               } @else if (ev.kind === 'thinking') {
-                <details class="collapsible-item" (toggle)="onDetailsToggle(ev, $event)">
-                  <summary>{{ isDeferred(ev) ? 'Razonamiento (cargar al expandir)' : thinkingSummary(ev.content) }}</summary>
-                  @if (isDeferred(ev)) { <pre class="ev-body muted">Contenido diferido: se cargará bajo demanda.</pre> }
-                  @else { <pre class="ev-body">{{ thinkingText(ev.content) }}</pre> }
-                </details>
-              } @else if (ev.kind === 'tool_group' || ev.kind === 'tool_call') {
-                <details class="collapsible-item" (toggle)="onDetailsToggle(ev, $event)" [title]="'Ver detalles de herramientas ejecutadas'">
-                  <summary>{{ isDeferred(ev) ? 'Herramientas (cargar al expandir)' : (ev.kind === 'tool_group' ? toolGroupSummary(ev.content) : toolSummary(ev.content)) }}</summary>
-                  @if (isDeferred(ev)) { <pre class="ev-body muted">Contenido diferido: se cargará bajo demanda.</pre> }
-                  @else { <pre class="ev-body">{{ ev.kind === 'tool_group' ? toolGroupText(ev.content) : toolText(ev.content) }}</pre> }
-                </details>
+                <div class="inline-event thinking-event">
+                  <div class="inline-title">Razonamiento</div>
+                  <pre class="ev-body">{{ thinkingText(ev.content) }}</pre>
+                </div>
+              } @else if (ev.kind === 'tool_group' || ev.kind === 'tool_call' || ev.kind === 'tool_result') {
+                <div class="inline-event tool-event">
+                  <div class="inline-title">{{ toolEventTitle(ev) }}</div>
+                  <pre class="ev-body tool-body">{{ toolText(ev.content) }}</pre>
+                </div>
               } @else if (ev.kind === 'response') {
                 <div class="response-wrap">
                   <div class="response-actions">
@@ -235,6 +229,11 @@ import { effortFull, effortShort, normalizeEffort } from '../../core/utils/think
     .group-child { padding:8px 10px; border:1px solid var(--border-color); border-radius:8px; background: rgba(255,255,255,0.02); }
     .group-child-meta { margin-bottom:6px; }
     .chat-item.kind-intermediate { border-color: rgba(210,153,34,0.18); background: rgba(210,153,34,0.03); }
+    .inline-event { margin: 2px 0 0; }
+    .inline-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 6px; }
+    .chat-item.kind-thinking .inline-title { color: #c9a8ff; }
+    .chat-item.kind-tool .inline-title { color: #d29922; }
+    .tool-body { color: #ffe6a3; font-size: 12px; line-height: 1.55; }
 
     .markdown-body { word-wrap: break-word; overflow-wrap: anywhere; }
     .markdown-body :is(p, ul, ol, pre, blockquote, table, h1, h2, h3, h4, hr, .mermaid-block) { margin: 0 0 0.8em; }
@@ -825,7 +824,124 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
   thinkingSummary(c: any): string { const o = this.tryParse(c); if (o?.summary) return String(o.summary) + (String(o.text || '').length > 80 ? '…' : ''); const t = o?.text || String(c || ''); return (t.replace(/\s+/g, ' ').trim().slice(0, 80) || 'Thinking') + (t.length > 80 ? '…' : ''); }
   thinkingText(c: any): string { const o = this.tryParse(c); return o?.text || String(c || ''); }
   toolSummary(c: any): string { const o = this.tryParse(c); if (o?.toolName) return `${o.toolName} (${o.phase || 'call'})`; const t = String(c || ''); try { const j = JSON.parse(t); if (j.tool || j.toolName) return `${j.tool || j.toolName}`; } catch {} return t.replace(/\s+/g, ' ').trim().slice(0, 80) || 'Tool call'; }
-  toolText(c: any): string { const o = this.tryParse(c); return o ? JSON.stringify(o, null, 2) : String(c || ''); }
+  displayChildren(ev: any): any[] {
+    const children = ev?.children || [];
+    const out: any[] = [];
+    const toolIndex = new Map<string, number>();
+    for (const child of children) {
+      if (child?.kind === 'thinking') { out.push(child); continue; }
+      const raw = (child?.content && typeof child.content === 'object' && !Array.isArray(child.content)) ? child.content : this.tryParse(child?.content);
+      const o: any = (raw && typeof raw === 'object') ? { ...raw } : {};
+      // lift top-level fields that sometimes live outside content
+      if (child?.toolName || child?.tool || child?.name) o.toolName = o.toolName || o.tool || o.name || child.toolName || child.tool || child.name;
+      if (child?.toolCallId || child?.tool_call_id || child?.id) o.toolCallId = o.toolCallId || o.tool_call_id || o.id || child.toolCallId || child.tool_call_id || child.id;
+      if (child?.args != null && o.args == null && o.arguments == null) o.args = child.args;
+      const callId = o.toolCallId || o.tool_call_id || o.id;
+      if (!callId) { out.push(child); continue; }
+      const key = String(callId);
+      const existingIdx = toolIndex.get(key);
+      if (existingIdx == null) {
+        toolIndex.set(key, out.length);
+        out.push({ ...child, content: JSON.stringify(o) });
+      } else {
+        const prev = this.tryParse(out[existingIdx].content) || {};
+        const merged = {
+          ...prev,
+          ...o,
+          args: (o.args != null ? o.args : (o.arguments != null ? o.arguments : (prev.args != null ? prev.args : prev.arguments))),
+          resultSummary: (o.resultSummary != null ? o.resultSummary : prev.resultSummary),
+          phase: o.phase || prev.phase,
+          toolName: o.toolName || o.tool || o.name || prev.toolName || prev.tool || prev.name,
+          toolCallId: o.toolCallId || o.tool_call_id || o.id || prev.toolCallId || prev.tool_call_id || prev.id,
+        };
+        out[existingIdx] = { ...out[existingIdx], kind: child.kind || out[existingIdx].kind, content: JSON.stringify(merged) };
+      }
+    }
+    return out;
+  }
+
+  private toolPayload(ev: any): any {
+    const raw = ev?.content;
+    let o = this.tryParse(raw);
+    if (!(o && typeof o === 'object' && !Array.isArray(o))) {
+      o = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? { ...raw } : {};
+    } else {
+      o = { ...o };
+    }
+    if (ev?.toolName || ev?.tool || ev?.name) o.toolName = o.toolName || o.tool || o.name || ev.toolName || ev.tool || ev.name;
+    if (ev?.args != null && o.args == null && o.arguments == null) o.args = ev.args;
+    if (ev?.resultSummary != null && o.resultSummary == null) o.resultSummary = ev.resultSummary;
+    if (ev?.phase && !o.phase) o.phase = ev.phase;
+    return o;
+  }
+
+  toolEventTitle(ev: any): string {
+    const o = this.toolPayload(ev);
+    const name = o.toolName || o.tool || o.name || 'tool';
+    const phase = o.phase ? ` · ${o.phase}` : '';
+    let args = o.args != null ? o.args : (o.arguments != null ? o.arguments : (o.input != null ? o.input : (o.parameters != null ? o.parameters : null)));
+    if (typeof args === 'string') args = this.tryParse(args) || args;
+    let hint = '';
+    if (args && typeof args === 'object' && !Array.isArray(args)) {
+      if (args.command) hint = ` — $ ${String(args.command).slice(0, 120)}`;
+      else if (args.path || args.file_path || args.filePath) hint = ` — ${String(args.path || args.file_path || args.filePath).slice(0, 120)}`;
+      else if (args.query || args.q || args.pattern) hint = ` — ${String(args.query || args.q || args.pattern).slice(0, 120)}`;
+      else if (args.url) hint = ` — ${String(args.url).slice(0, 120)}`;
+      else if (args.goal) hint = ` — ${String(args.goal).slice(0, 120)}`;
+      else {
+        const keys = Object.keys(args);
+        if (keys.length) hint = ` — ${keys.slice(0, 2).map(k => `${k}: ${this.compactArg(args[k])}`).join(', ')}`;
+      }
+    } else if (typeof args === 'string' && args.trim()) {
+      hint = ` — ${args.slice(0, 120)}`;
+    } else if (Array.isArray(args) && args.length) {
+      hint = ` — [${args.length} args]`;
+    }
+    if (!hint && (o.resultSummary || o.result || o.output) != null && String(o.resultSummary || o.result || o.output).trim()) {
+      hint = ' — (resultado)';
+    }
+    return `${name}${phase}${hint}`;
+  }
+
+  toolText(c: any): string {
+    const raw = c;
+    let o = (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c } : this.tryParse(c);
+    if (o && typeof o === 'object' && !Array.isArray(o)) {
+      o = { ...o };
+      let args = o.args != null ? o.args : (o.arguments != null ? o.arguments : (o.input != null ? o.input : (o.parameters != null ? o.parameters : null)));
+      if (typeof args === 'string') args = this.tryParse(args) || args;
+      let detail = '';
+      if (args != null) {
+        if (typeof args === 'object' && !Array.isArray(args)) {
+          if (args.command) {
+            detail = `$ ${args.command}` + (args.cwd ? `\n(cwd: ${args.cwd})` : '');
+          } else {
+            const keys = Object.keys(args);
+            detail = keys.length ? keys.map(k => `${k}: ${this.compactArg(args[k])}`).join('\n') : JSON.stringify(args, null, 2);
+          }
+        } else {
+          detail = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
+        }
+      }
+      const resVal = o.resultSummary ?? o.result ?? o.output;
+      const res = resVal != null && String(resVal).trim() ? `→ ${String(resVal).slice(0, 400)}` : '';
+      const parts = [detail, res].filter(Boolean);
+      if (parts.length) return parts.join('\n');
+      const fallback: any = { ...o };
+      ['order','phase','toolName','tool','name','toolCallId','tool_call_id','id'].forEach(k => delete fallback[k]);
+      const rest = JSON.stringify(fallback, null, 2);
+      if (rest && rest !== '{}') return rest;
+      const nm = o.toolName || o.tool || o.name;
+      return nm ? String(nm) : '(sin detalles)';
+    }
+    if (typeof raw === 'string') return raw;
+    try { return JSON.stringify(raw, null, 2); } catch { return String(raw ?? ''); }
+  }
+  private compactArg(v: any): string {
+    if (v == null) return String(v);
+    if (typeof v === 'string') return v.length > 160 ? v.slice(0, 160) + '…' : v;
+    try { const s = JSON.stringify(v); return s.length > 160 ? s.slice(0, 160) + '…' : s; } catch { return String(v); }
+  }
   toolGroupCount(content: any): number {
     try { const j = typeof content === 'string' ? JSON.parse(content) : content; return Array.isArray(j) ? j.length : 1; } catch { return 1; }
   }

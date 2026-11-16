@@ -32,24 +32,14 @@ export function buildPlannerRoster(
   return [...byId.values()];
 }
 
-/** Tool access follows persisted task flow, role and explicit routing state. */
-export function allowedToolsForTaskFlow(flow?: string | null, role?: string | null, planningAllowed = true, terminalWorkerResult = false): string[] {
-  if (flow === 'delegation_progress') return [];
-  if (flow === 'delegation_result' && terminalWorkerResult && String(role || '').toUpperCase() !== 'CHIEF') return [];
-  if (String(role || '').toUpperCase() === 'CHIEF') {
-    return planningAllowed
-      ? ['read', 'delegate_task', 'plan_delegation']
-      : ['read', 'delegate_task'];
-  }
-  const tools = ['read', 'bash', 'edit', 'write', 'delegate_task'];
-  return planningAllowed ? [...tools, 'plan_delegation'] : tools;
+/** Expose all Pi-provided tools to every agent/session (no flow/role/task gating). */
+export function allowedToolsForTaskFlow(_flow?: string | null, _role?: string | null, _planningAllowed = true, _terminalWorkerResult = false): string[] {
+  return ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls', 'delegate_task', 'plan_delegation'];
 }
 
-/** Planning is available only when no route is attached; a terminal plan is still a completed route. */
-export function canPlanDelegation(input: { flow?: string | null; planState?: string | null; explicitlyAddressedRecipient?: boolean }): boolean {
-  return input.flow !== 'delegation_progress'
-    && !input.planState
-    && !input.explicitlyAddressedRecipient;
+/** Planning remains available in all sessions. */
+export function canPlanDelegation(_input: { flow?: string | null; planState?: string | null; explicitlyAddressedRecipient?: boolean }): boolean {
+  return true;
 }
 
 /** Resolve an explicitly addressed recipient from the active roster, without an LLM. */

@@ -6,10 +6,10 @@
 
   @if (activeTab === 'lineage') {
     <div class="memory-strip" *ngIf="agents?.length">
-      <div class="memory-strip-title">Memoria por agente</div>
+      <div class="memory-strip-title" title="pref.: preferencia de memoria activada para el agente, pero no efectiva ahora (global/workspace/MCP no disponible o deshabilitado). efectiva: memoria activa y utilizable. off: sin memoria para este agente.">Memoria por agente</div>
       <div class="memory-strip-list">
         @for (a of agents; track a.id) {
-          <div class="mem-agent" [title]="a.nickname || a.name">
+          <div class="mem-agent" [title]="(a.nickname || a.name) + ' · ' + (a.memoryPreference || a.memory_enabled ? (a.memoryEffective ? 'Memoria efectiva: el agente puede usarla ahora.' : 'Preferencia activa (pref.): no efectiva ahora por condiciones global/workspace/MCP.') : 'Memoria desactivada (off) para este agente.')">
             <span class="dot" [style.background]="a.color || 'var(--accent-blue)'"></span>
             <span class="aname">{{ a.nickname || a.name }}</span>
             <span class="pill" [class.on]="a.memoryEffective" [class.off]="!a.memoryEffective">{{ a.memoryPreference || a.memory_enabled ? (a.memoryEffective ? 'efectiva' : 'pref.') : 'off' }}</span>

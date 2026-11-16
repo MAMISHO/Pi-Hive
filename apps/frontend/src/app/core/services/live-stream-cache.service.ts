@@ -1,11 +1,23 @@
 import { Injectable } from '@angular/core';
 import { StreamTextEvent, StreamToolEvent } from '../models/stream.model';
 
+export interface LiveLogEntry {
+  kind: 'text' | 'thinking' | 'tool';
+  text?: string;
+  toolName?: string;
+  toolCallId?: string;
+  args?: any;
+  resultSummary?: string;
+  phase?: string;
+  seq?: number;
+}
+
 export interface AgentLiveBuffer {
   runId?: string | null;
   text: string;
   thinking: string;
   tools: Array<{ toolName?: string; toolCallId?: string; args?: any; resultSummary?: string; phase?: string }>;
+  log: LiveLogEntry[];
   seq: number;
   active?: boolean;
 }
@@ -16,15 +28,16 @@ export class LiveStreamCacheService {
   private lastFinishedRunId = new Map<string, string>();
 
   get(agentId?: string | null): AgentLiveBuffer {
-    if (!agentId) return { text: '', thinking: '', tools: [], seq: 0, active: false };
+    if (!agentId) return { text: '', thinking: '', tools: [], log: [], seq: 0, active: false };
     let b = this.buffers.get(agentId);
-    if (!b) { b = { text: '', thinking: '', tools: [], seq: 0, active: false }; this.buffers.set(agentId, b); }
+    if (!b) { b = { text: '', thinking: '', tools: [], log: [], seq: 0, active: false }; this.buffers.set(agentId, b); }
+    if (!b.log) b.log = [];
     return b;
   }
 
   resetRun(agentId: string, runId?: string | null) {
     if (runId) this.lastFinishedRunId.delete(agentId);
-    this.buffers.set(agentId, { runId, text: '', thinking: '', tools: [], seq: 0, active: true });
+    this.buffers.set(agentId, { runId, text: '', thinking: '', tools: [], log: [], seq: 0, active: true });
   }
 
   clear(agentId?: string | null) {
@@ -37,7 +50,7 @@ export class LiveStreamCacheService {
     const rid = runId || b?.runId || null;
     if (runId && b?.runId && runId !== b.runId) return; // stale finished/error
     if (rid) this.lastFinishedRunId.set(agentId, String(rid));
-    this.buffers.set(agentId, { runId: rid, text: '', thinking: '', tools: [], seq: 0, active: false });
+    this.buffers.set(agentId, { runId: rid, text: '', thinking: '', tools: [], log: [], seq: 0, active: false });
   }
 
   private isStale(agentId: string, runId?: string | null): boolean {
@@ -55,14 +68,22 @@ export class LiveStreamCacheService {
     if (this.isStale(ev.agentId, ev.runId)) return;
     const b = this.get(ev.agentId);
     if (ev.runId && b.runId && b.runId !== ev.runId) {
-      // different active run id in buffer but not marked finished: treat as stale for this buffer context
       if (b.active) return;
     }
     if (ev.runId && !b.runId) b.runId = ev.runId;
     if (ev.seq && ev.seq <= b.seq) return;
     if (ev.seq) b.seq = ev.seq;
     b.active = true;
-    if (ev.kind === 'thinking') b.thinking += ev.delta || ''; else b.text += ev.delta || '';
+    const delta = ev.delta || '';
+    const kind: 'text' | 'thinking' = ev.kind === 'thinking' ? 'thinking' : 'text';
+    if (kind === 'thinking') b.thinking += delta; else b.text += delta;
+    const last = b.log[b.log.length - 1];
+    if (last && last.kind === kind) {
+      last.text = (last.text || '') + delta;
+      last.seq = ev.seq;
+    } else if (delta) {
+      b.log.push({ kind, text: delta, seq: ev.seq });
+    }
   }
 
   applyTool(ev: StreamToolEvent) {
@@ -74,6 +95,8 @@ export class LiveStreamCacheService {
     if (ev.seq && ev.seq <= b.seq) return;
     if (ev.seq) b.seq = ev.seq;
     b.active = true;
-    b.tools = [...b.tools, { toolName: ev.toolName, toolCallId: ev.toolCallId, args: ev.args, resultSummary: ev.resultSummary, phase: ev.phase }];
+    const entry = { toolName: ev.toolName, toolCallId: ev.toolCallId, args: ev.args, resultSummary: ev.resultSummary, phase: ev.phase };
+    b.tools = [...b.tools, entry];
+    b.log.push({ kind: 'tool', ...entry, seq: ev.seq });
   }
 }

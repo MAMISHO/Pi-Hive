@@ -19,9 +19,13 @@ export class WorkspaceController {
     @Optional() @Inject(NexoPalaceMemoryService) private readonly memory?: NexoPalaceMemoryService,
   ) {}
 
+  private isMemoryFlagEnabled(value: any): boolean {
+    return value === true || value === 1 || value === '1';
+  }
+
   private async withMemoryState<T extends Record<string, any>>(ws: T | null): Promise<any> {
     if (!ws) return ws;
-    if (!this.memory) return { ...ws, memoryPreference: (ws as any).memory_enabled === true, memoryEffective: false, memoryAvailable: false, memoryGlobalEnabled: false, memoryConfigured: false };
+    if (!this.memory) return { ...ws, memoryPreference: this.isMemoryFlagEnabled((ws as any).memory_enabled), memoryEffective: false, memoryAvailable: false, memoryGlobalEnabled: false, memoryConfigured: false };
     return this.memory.decorateWorkspace(ws);
   }
 

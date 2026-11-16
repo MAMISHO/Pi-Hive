@@ -48,6 +48,8 @@ export class SidebarRightComponent implements OnInit, OnDestroy {
     this.subs.push((this.ws as any).transcriptCleared$?.subscribe(rel) || ({ unsubscribe() {} } as any));
     this.subs.push(this.tokenUsage.runs$.subscribe(r => { this.usageRuns = r; this.cdr.detectChanges(); }));
     this.subs.push(this.tokenUsage.workspaceTotals$.subscribe(t => { this.usageTotals = t; this.cdr.detectChanges(); }));
+    // Reactivo: refrescar strip/listas cuando se crean/actualizan agentes (p.ej. toggle memoria)
+    this.subs.push(this.agentService.agentChanged$.subscribe(rel));
   }
 
   setTab(tab: 'lineage' | 'usage') {
