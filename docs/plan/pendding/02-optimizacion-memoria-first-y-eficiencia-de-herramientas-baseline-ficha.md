@@ -1,0 +1,19 @@
+# Ficha de línea base — Plan 02 (optimización memoria-first)
+
+Fuente primaria: auditoría entregada del run `dc0388fc-ce10-494c-90d0-04676d5fff12` (workspace `5479dcc2…/expression`, agente Chief, `2026-11-16T15:20:23Z`, prompt: “explora el workspace usando el MCP nexo-palace cuando sea posible”). No se modificó el run, su workspace ni artefactos de auditoría.
+
+## Hechos reportados (fuente: auditoría)
+- Visibilidad MCP: `memory_state.effective:true` (`reason:ok`), `memory_pi_session available:true` (`memory_query`,`memory_trace` cargadas), `session_tools_activated` con las 7 tools Nexo-Palace (`memory_query, memory_trace, memory_path, memory_record_decision, memory_map, memory_drift, memory_status`) en `activeTools/allTools`.
+- Uso real: invocaciones correctas a `mcp__nexo_palace__memory_status` (~685 chars) y `mcp__nexo_palace__memory_query` (~1200 chars, ~12.7s call→result). No se usaron `memory_map`, `memory_path`, `memory_trace`, `memory_drift`, `memory_record_decision`. Hubo un intento erróneo de invocar `memory_status` vía `bash`.
+- Métricas reportadas: `completed` (`stopReason: toolUse`), 178.9 s, 5 turnos, `toolCallsTotal` 28, `delegated:false`, `nudged:false`, tokens `input 35,650`, `output 867`, `cacheRead 16,254`, `totalTokens 52,771`. `prompt_size` inicial ~5,937 chars (~1,485 tok est.) + turno ~1,028 chars (~1,742 total est.).
+- Patrón: exploración filesystem previa (ls/find/read/bash, incluidos volcados), memoria consultada tarde/complementaria y lecturas redundantes tras resultados de memoria.
+
+## Reconciliación e incertidumbres (no inferir ausente)
+- **Fuente de cifras:** provienen del informe de auditoría/trazas referidas; no se reexportó la traza persistida desde DB local en esta ejecución (`agent_run_logs` no disponible en la BD local consultada), por lo que la deduplicación por `toolCallId`/evento SDK y el desglose por IDs/timestamps no pudieron verificarse aquí. La lista de tools/eventos deduplicada queda pendiente de verificación contra la traza persistida/canónica.
+- **`toolCallsTotal:28`:** requiere reconciliar `tool_call`/`tool_result` y eventos SDK (`toolcall_start/toolcall_end/tool_execution_*`); puede incluir eventos duplicados de lifecycle o nombres vacíos reportados. No debe asumirse como 28 ejecuciones únicas sin correlación por `toolCallId`.
+- **Tokens/turnos:** `cacheRead` y su relación con `input/totalTokens` dependen de la definición del proveedor; “5 turnos” (runner/modelo) y la separación provider-usage vs estimación de prompt no se confirmaron en esta ficha. No se consideran “evitables” sin comparación controlada.
+- **Causalidad:** la secuencia es compatible con guidance de exploración poco clara, pero un solo run no aísla causa (modelo/razonamiento, esquemas/coste de tools, calidad/frescura del índice, contexto, instrucciones del workspace/tarea). “memoria_map/path reducen exploración” es hipótesis, no beneficio medido.
+- **Runtime tools:** Nexo-Palace v0.2.0 expone 7 tools (`memory_query, memory_trace, memory_record_decision, memory_status, memory_path, memory_map, memory_drift`); semántica exacta de schemas/campos debe validarse contra la versión conectada. `memory_record_decision` es potencialmente escritora (no herramienta habitual de lectura).
+
+## Instrumentación añadida (para futuras comparaciones reproducibles)
+`run_usage` pasa a registrar (derivado, sin cuerpos completos): `toolCallsUnique`/`toolCallsUnknownName`, `toolCategories` (memory/filesystem/shell/delegation/other), `firstExplorationTool`, `toolResults` (count/errors/memoryResultBytes), `memory` (effective/reason/observedToolNames/resultState), `providerUsage` con nota de semántica cache, y `promptEstimate` separado (método/secciones/tokens estimados). Conteo deduplicado por `toolCallId`/clave canónica en el runner para evitar inflar por eventos SDK duplicados. Comparaciones futuras deben hacerse en workspace/fixture seguro, tarea equivalente y condiciones declaradas.

@@ -805,9 +805,10 @@ export class AgentRunnerService implements OnModuleInit {
         this.trace.record({ runId, agentId: agent.id, eventType: 'memory_state', taskId: task.id, workspaceId,
           eventData: { effective: memoryState.effective, reason: memoryState.reason, globalEnabled: memoryState.globalEnabled, configured: memoryState.configured, available: memoryState.available, workspaceEnabled: memoryState.workspaceEnabled, agentEnabled: memoryState.agentEnabled } }).catch(() => {});
       }
-      const memoryToolNames = memoryEffective ? ['memory_query', 'memory_trace', 'mcp__nexo_palace__memory_query', 'mcp__nexo_palace__memory_trace', 'mcp__nexo_palace__memory_status', 'mcp__nexo_palace__memory_path', 'mcp__nexo_palace__memory_map', 'mcp__nexo_palace__memory_drift', 'mcp__nexo_palace__memory_record_decision'] : [];
-      const systemPrompt = await this.promptBuilder.buildSystem({ agent, team: availableAgents, memoryEffective, memoryToolNames });
-      const systemPromptHash = createHash('sha1').update(String(systemPrompt || '')).digest('hex');
+      const memoryToolNamesSeed = memoryEffective ? ['memory_query', 'memory_trace', 'memory_status', 'memory_path'] : [];
+      let memoryToolNames = [...memoryToolNamesSeed];
+      let systemPrompt = await this.promptBuilder.buildSystem({ agent, team: availableAgents, memoryEffective, memoryToolNames });
+      let systemPromptHash = createHash('sha1').update(String(systemPrompt || '')).digest('hex');
       const hasInjectedContext = !!String(systemPrompt || '').trim();
       // Skip reapplying/persisting an unchanged system prompt on resumed sessions (Pi session already has context).
       const systemChanged = this.systemPromptHashByAgent.get(agent.id) !== systemPromptHash;
@@ -885,9 +886,10 @@ export class AgentRunnerService implements OnModuleInit {
       let agentDir = '';
       try { agentDir = await this.appSettings.resolvePiAgentDir(); } catch { agentDir = path.join(process.cwd(), 'data', 'pi-agent'); }
       try {
-        // Expose all Pi-configured MCP/extensions (including memory servers) to every agent/session.
+        // Pi owns MCP configuration; only include the optional memory server when this
+        // agent is effectively enabled. Other Pi MCP servers keep their configured behavior.
         const memoryMcpOptions = this.memoryService
-          ? await this.memoryService.resourceLoaderOptions(true)
+          ? await this.memoryService.resourceLoaderOptions(memoryEffective && !terminalWorkerResult)
           : {};
         resourceLoader = new (DefaultResourceLoader as any)({ cwd, agentDir, systemPrompt, ...memoryMcpOptions });
         // createAgentSession does not reload a caller-supplied ResourceLoader. Load extensions
@@ -975,6 +977,56 @@ export class AgentRunnerService implements OnModuleInit {
         });
       };
 
+      const classifyToolName = (name: string): 'memory' | 'filesystem' | 'shell' | 'delegation' | 'other' => {
+        const n = String(name || '').trim();
+        if (!n) return 'other';
+        if (/memory_(query|trace|status|path|map|drift|record_decision)$/i.test(n) || /^mcp__.*__memory_(query|trace|status|path|map|drift|record_decision)$/i.test(n)) return 'memory';
+        if (['read', 'write', 'edit', 'grep', 'find', 'ls'].includes(n)) return 'filesystem';
+        if (['bash', 'shell', 'exec', 'execute'].includes(n)) return 'shell';
+        if (['delegate_task', 'plan_delegation'].includes(n)) return 'delegation';
+        return 'other';
+      };
+      const toolCallKeys = new Set<string>();
+      const toolExecIds = new Set<string>();
+      const toolCategoryCounts = { memory: 0, filesystem: 0, shell: 0, delegation: 0, other: 0 };
+      let toolCallsUnique = 0;
+      let toolCallsUnknownName = 0;
+      let toolResultCount = 0;
+      let toolErrorCount = 0;
+      let memoryResultChars = 0;
+      let firstExplorationTool: { name: string | null; category: 'memory' | 'filesystem' | 'shell' | 'delegation' | 'other' | 'none' | 'unknown'; source: string } | null = null;
+      let memoryResultState: 'not_used' | 'returned' | 'empty' | 'error' = 'not_used';
+      const toolNamesSeen = new Set<string>();
+      const noteToolCall = (toolNameRaw: any, source: string, toolCallId?: any) => {
+        const toolName = String(toolNameRaw || '').trim();
+        if (toolName) toolNamesSeen.add(toolName);
+        const callId = String(toolCallId || '').trim();
+        let key = callId ? `id:${callId}` : `anon:${source}:${toolName || 'unknown'}:${toolSeq + 1}`;
+        if (!key || toolCallKeys.has(key)) return;
+        toolCallKeys.add(key);
+        toolCallsUnique += 1;
+        if (!toolName) toolCallsUnknownName += 1;
+        const category = toolName ? classifyToolName(toolName) : 'other';
+        toolCategoryCounts[category] = (toolCategoryCounts[category] || 0) + 1;
+        if (!firstExplorationTool && (category === 'memory' || category === 'filesystem' || category === 'shell')) {
+          firstExplorationTool = { name: toolName || null, category: toolName ? category : 'unknown', source };
+        }
+      };
+      const noteToolResult = (toolNameRaw: any, isError: boolean, resultSummary: string) => {
+        toolResultCount += 1;
+        if (isError) toolErrorCount += 1;
+        const toolName = String(toolNameRaw || '').trim();
+        const category = classifyToolName(toolName);
+        if (category === 'memory') {
+          if (isError) memoryResultState = 'error';
+          else {
+            const len = String(resultSummary || '').trim().length;
+            memoryResultState = len > 0 ? 'returned' : 'empty';
+          }
+          memoryResultChars += String(resultSummary || '').length;
+        }
+      };
+
       const flushThinking = async () => {
         if (!thinkBuf) return;
         const t = thinkBuf; thinkBuf = '';
@@ -1002,6 +1054,13 @@ export class AgentRunnerService implements OnModuleInit {
         const payload = JSON.stringify({ ...info, phase, order: toolSeq });
         await this.saveChatEvent(workspaceId, agent.id, task, 'OUTBOUND', 'tool_call', payload, groupId, { currentRequestEventId }).catch(() => {});
       };
+      const shouldSkipToolExecEnd = (toolCallId?: any) => {
+        const id = String(toolCallId || '').trim();
+        if (!id) return false;
+        if (toolExecIds.has(id)) return true;
+        toolExecIds.add(id);
+        return false;
+      };
 
       const pickAssistantMeta = (ev: any) => {
         const msgs = ev?.messages || ev?.result?.messages || [];
@@ -1010,47 +1069,68 @@ export class AgentRunnerService implements OnModuleInit {
 
       let memoryRuntimeChecked = false;
       let mcpToolsActivated = false;
-      const activateLoadedMcpTools = (force = false) => {
-        if ((mcpToolsActivated && !force) || typeof (session as any).getAllTools !== 'function') return;
+      let systemPromptSyncedWithTools = false;
+      const activateLoadedMcpTools = async (force = false): Promise<string[]> => {
+        if (typeof (session as any).getAllTools !== 'function') return [] as string[];
         try {
-          const allNames = (session as any).getAllTools().map((tool: any) => String(tool?.name || '')).filter(Boolean);
-          if (!allNames.length) return;
-          // The Pi SDK allowlist set at session creation (_allowedTools from opts.tools) blocks
-          // direct MCP tools from activation (_isActivatable), so they never reach the model even
-          // when registered by extensions. Clear the allowlist and activate the full registered set
-          // so every Pi/MCP tool is exposed to the agent session/model.
-          try { if ('_allowedTools' in session) (session as any)._allowedTools = undefined; } catch {}
-          if (typeof (session as any)._setActiveTools === 'function') (session as any)._setActiveTools(allNames);
-          else if (typeof (session as any).setActiveToolsByName === 'function') (session as any).setActiveToolsByName(allNames);
-          mcpToolsActivated = true;
-          // Keep the effective system prompt in sync (memory block/tool names) for this session.
-          if (memoryEffective) {
-            try { this.applySystemPrompt(session, systemPrompt); } catch {}
+          const allNames: string[] = (session as any).getAllTools().map((tool: any) => String(tool?.name || '')).filter(Boolean);
+          if (!allNames.length) return [] as string[];
+          const needsActivation = !mcpToolsActivated || force;
+          if (needsActivation) {
+            // The Pi SDK allowlist set at session creation (_allowedTools from opts.tools) blocks
+            // direct MCP tools from activation (_isActivatable), so they never reach the model even
+            // when registered by extensions. Clear the allowlist and activate the full registered set
+            // so every Pi/MCP tool is exposed to the agent session/model.
+            try { if ('_allowedTools' in session) (session as any)._allowedTools = undefined; } catch {}
+            if (typeof (session as any)._setActiveTools === 'function') (session as any)._setActiveTools(allNames);
+            else if (typeof (session as any).setActiveToolsByName === 'function') (session as any).setActiveToolsByName(allNames);
+            mcpToolsActivated = true;
           }
-          const activeTools = typeof (session as any).getActiveToolNames === 'function' ? (session as any).getActiveToolNames() : allNames;
-          this.trace.record({ runId, agentId: agent.id, eventType: 'session_tools_activated', taskId: task.id, workspaceId,
-            eventData: { activeTools, allTools: allNames } }).catch(() => {});
+          const activeTools: string[] = typeof (session as any).getActiveToolNames === 'function' ? (session as any).getActiveToolNames() : allNames;
+          // If memory is effective, prefer the actual memory MCP tool names exposed by the session
+          // (server alias/prefix can vary) and keep the session system prompt in sync once.
+          if (memoryEffective && !systemPromptSyncedWithTools) {
+            const runtimeMemoryTools = Array.from(new Set(allNames.filter((name: string) => /^mcp__.*__memory_/i.test(name) || /^memory_/i.test(name))));
+            if (runtimeMemoryTools.length) {
+              memoryToolNames = runtimeMemoryTools;
+              try {
+                systemPrompt = await this.promptBuilder.buildSystem({ agent, team: availableAgents, memoryEffective, memoryToolNames });
+                systemPromptHash = createHash('sha1').update(String(systemPrompt || '')).digest('hex');
+              } catch {}
+            }
+            try { this.applySystemPrompt(session, systemPrompt); } catch {}
+            systemPromptSyncedWithTools = true;
+          }
+          if (needsActivation || force) {
+            this.trace.record({ runId, agentId: agent.id, eventType: 'session_tools_activated', taskId: task.id, workspaceId,
+              eventData: { activeTools, allTools: allNames } }).catch(() => {});
+          }
+          return allNames;
         } catch (e) {
           console.warn('[AgentRunner] failed to activate loaded MCP/session tools', e);
+          return [] as string[];
         }
       };
       const unsubscribe = session.subscribe((event: any) => {
         // Activate all Pi/MCP tools (clearing SDK allowlist) so direct MCP tools reach the model.
         // Run on early lifecycle events; MCP direct tools can finish registering around these points.
         if (event?.type === 'before_agent_start' || event?.type === 'agent_start' || event?.type === 'turn_start') {
-          activateLoadedMcpTools(event?.type === 'turn_start' || event?.type === 'agent_start');
+          void activateLoadedMcpTools(event?.type === 'turn_start' || event?.type === 'agent_start');
         }
         // Pi waits for direct MCP tools in before_agent_start. Inspect after that wait, at agent_start,
         // instead of mistaking the initial background connection window for a failure.
-        if (!memoryRuntimeChecked && this.memoryService && event.type === 'agent_start') {
+        // A session without memory permission intentionally has no Nexo tools. Its empty
+        // tool list is not evidence that the shared Pi MCP server is unavailable.
+        if (!memoryRuntimeChecked && memoryEffective && !terminalWorkerResult && this.memoryService && event.type === 'agent_start') {
           memoryRuntimeChecked = true;
-          activateLoadedMcpTools(true);
-          const toolNames = typeof session?.getAllTools === 'function'
-            ? session.getAllTools().map((tool: any) => String(tool?.name || ''))
-            : [];
-          const memoryRuntime = this.memoryService.recordPiSessionMemoryTools(toolNames);
-          this.trace.record({ runId, agentId: agent.id, eventType: 'memory_pi_session', taskId: task.id, workspaceId,
-            eventData: { available: memoryRuntime.available, reason: memoryRuntime.reason, toolNames: toolNames.filter((name: string) => /^mcp__.*__(memory_query|memory_trace)$/.test(name)) } }).catch(() => {});
+          void (async () => {
+            const toolNames = await activateLoadedMcpTools(true);
+            const allToolNames = toolNames.length ? toolNames : (typeof session?.getAllTools === 'function' ? session.getAllTools().map((tool: any) => String(tool?.name || '')) : []);
+            const memoryRuntime = this.memoryService.recordPiSessionMemoryTools(allToolNames);
+            const observedMemoryTools = Array.from(new Set(allToolNames.filter((name: string) => /^mcp__.*__memory_/i.test(name) || /^memory_/i.test(name))));
+            this.trace.record({ runId, agentId: agent.id, eventType: 'memory_pi_session', taskId: task.id, workspaceId,
+              eventData: { available: memoryRuntime.available, reason: memoryRuntime.reason, observedToolCount: observedMemoryTools.length, toolNames: observedMemoryTools } }).catch(() => {});
+          })();
         }
         if (event.type === 'message_end' && event.message?.role === 'assistant' && event.message?.usage) {
           accumulateUsage(event.message.usage);
@@ -1059,14 +1139,14 @@ export class AgentRunnerService implements OnModuleInit {
           const ame = event.assistantMessageEvent;
           if (ame.type === 'text_delta' && ame.delta) { if (discardStreamingEvents) return; flushThinking().catch(() => {}); assistantText += ame.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: ame.delta, kind: 'text', emittedAt: Date.now() }); this.trace.textOutput(runId, agent.id, workspaceId, task.id, ame.delta.length).catch(() => {}); }
           if (ame.type === 'thinking_delta' && ame.delta) { if (discardStreamingEvents) return; thinkBuf += ame.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: ame.delta, kind: 'thinking', emittedAt: Date.now() }); this.trace.thinking(runId, agent.id, workspaceId, task.id, ame.delta.length).catch(() => {}); }
-          if (ame.type === 'toolcall_start') { const tc = ame.toolCall || {}; if (discardStreamingEvents) return; toolCallsTotal++; flushThinking().catch(() => {}); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(tc.name || ''), JSON.stringify(tc.arguments||'')).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'start', toolName: tc.name, toolCallId: tc.id, args: tc.arguments, emittedAt: Date.now() }); saveToolEvent('start', { toolName: tc.name, toolCallId: tc.id, args: tc.arguments }).catch(() => {}); }
+          if (ame.type === 'toolcall_start') { const tc = ame.toolCall || {}; if (discardStreamingEvents) return; flushThinking().catch(() => {}); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(tc.name || ''), JSON.stringify(tc.arguments||'')).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'start', toolName: tc.name, toolCallId: tc.id, args: tc.arguments, emittedAt: Date.now() }); saveToolEvent('start', { toolName: tc.name, toolCallId: tc.id, args: tc.arguments }).catch(() => {}); }
           if (ame.type === 'toolcall_end') { const tc = ame.toolCall || {}; if (discardStreamingEvents) return; agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'call', toolName: tc.name, toolCallId: tc.id, args: tc.arguments, emittedAt: Date.now() }); saveToolEvent('call', { toolName: tc.name, toolCallId: tc.id, args: tc.arguments }).catch(() => {}); }
           if (ame.error) { runError = String(ame.error?.message || ame.error); lastErrorMessage = runError; }
         }
         if (event.type === 'text_delta' && event.delta) { if (discardStreamingEvents) return; flushThinking().catch(() => {}); assistantText += event.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: event.delta, kind: 'text', emittedAt: Date.now() }); }
-        if (event.type === 'tool_execution_start') { if (discardStreamingEvents) return; toolCallsTotal++; flushThinking().catch(() => {}); const s = JSON.stringify({ tool: event.toolName, args: event.args }); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(event.toolName||''), s).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'start', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); saveToolEvent('start', { toolName: event.toolName, toolCallId: event.toolCallId, args: event.args }).catch(() => {}); }
-        if (event.type === 'tool_execution_end') { if (discardStreamingEvents) return; const resultSummaryFull = toResultSummary(event.result); this.trace.toolResult(runId, agent.id, workspaceId, task.id, String(event.toolName||''), !!event.isError, resultSummaryFull.length).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: event.isError ? 'error' : 'end', toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: event.isError ? resultSummaryFull.slice(0, 300) : undefined, emittedAt: Date.now() }); saveToolEvent(event.isError ? 'error' : 'end', { toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: resultSummaryFull, isError: !!event.isError }).catch(() => {}); }
-        if (event.type === 'tool_call' && event.toolName) { if (discardStreamingEvents) return; toolCallsTotal++; flushThinking().catch(() => {}); const s = JSON.stringify({ tool: event.toolName, args: event.args }); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(event.toolName||''), s).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'call', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); saveToolEvent('call', { toolName: event.toolName, toolCallId: event.toolCallId, args: event.args }).catch(() => {}); }
+        if (event.type === 'tool_execution_start') { if (discardStreamingEvents) return; toolCallsTotal++; flushThinking().catch(() => {}); noteToolCall(event.toolName, 'tool_execution_start', event.toolCallId); const s = JSON.stringify({ tool: event.toolName, args: event.args }); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(event.toolName||''), s).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'start', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); saveToolEvent('start', { toolName: event.toolName, toolCallId: event.toolCallId, args: event.args }).catch(() => {}); }
+        if (event.type === 'tool_execution_end') { if (discardStreamingEvents || shouldSkipToolExecEnd(event.toolCallId)) return; const resultSummaryFull = toResultSummary(event.result); noteToolResult(event.toolName, !!event.isError, resultSummaryFull); this.trace.toolResult(runId, agent.id, workspaceId, task.id, String(event.toolName||''), !!event.isError, resultSummaryFull.length).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: event.isError ? 'error' : 'end', toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: event.isError ? resultSummaryFull.slice(0, 300) : undefined, emittedAt: Date.now() }); saveToolEvent(event.isError ? 'error' : 'end', { toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: resultSummaryFull, isError: !!event.isError }).catch(() => {}); }
+        if (event.type === 'tool_call' && event.toolName) { if (discardStreamingEvents) return; flushThinking().catch(() => {}); const s = JSON.stringify({ tool: event.toolName, args: event.args }); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(event.toolName||''), s).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'call', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); saveToolEvent('call', { toolName: event.toolName, toolCallId: event.toolCallId, args: event.args }).catch(() => {}); }
         if (event.type === 'agent_end') { willRetry = !!event.willRetry; pickAssistantMeta(event); flushThinking().catch(() => {}); }
         if (event.type === 'agent_settled') { settledAborted = !!event.aborted; }
         if (event.type === 'auto_retry_start') { willRetry = true; agentEventEmitter.emit('agent:run:warning', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'auto_retry', message: `retry ${event.attempt ?? ''}`, emittedAt: Date.now() }); }
@@ -1115,6 +1195,7 @@ export class AgentRunnerService implements OnModuleInit {
 
       // Observabilidad: persist per-run usage/totals for token audits (provider metrics may be partial per turn).
       const recordRunUsage = (outcome: string) => {
+        const uniqueCount = toolCallsUnique;
         this.trace.record({
           runId, agentId: agent.id, eventType: 'run_usage', taskId: task.id, workspaceId,
           eventData: {
@@ -1124,8 +1205,30 @@ export class AgentRunnerService implements OnModuleInit {
             model: resolved.raw,
             turns: usageTurns,
             totals: JSON.parse(JSON.stringify(runUsageTotals)),
+            providerUsage: {
+              totals: JSON.parse(JSON.stringify(runUsageTotals)),
+              semantics: { note: 'provider-reported turn usage accumulated; cacheRead/cacheWrite are reported by the provider and may or may not overlap input/totalTokens depending on provider definition' },
+            },
+            promptEstimate: {
+              estimateMethod: promptSize?.estimateMethod || 'ceil(chars/4)',
+              sections: promptSize?.sections || {},
+              totalEstimatedTokens: promptSize?.totalEstimatedTokens ?? Math.ceil((String(systemPrompt || '').length + promptText.length) / 4),
+              note: 'character-based estimate; separate from provider usage',
+            },
             nudged: retryNudged,
-            toolCallsTotal,
+            toolCallsTotal: uniqueCount,
+            toolCallsUnique: uniqueCount,
+            toolCallsUnknownName,
+            toolCategories: { ...toolCategoryCounts },
+            firstExplorationTool: firstExplorationTool || { name: null, category: 'none', source: 'none' },
+            toolResults: { count: toolResultCount, errors: toolErrorCount, memoryResultChars, memoryResultLengthLimit: 1200 },
+            memory: {
+              effective: memoryEffective,
+              reason: memoryState?.reason ?? null,
+              observedToolCount: Array.from(toolNamesSeen).filter((n) => /^mcp__.*__memory_/i.test(n) || /^memory_/i.test(n)).length,
+              observedToolNames: Array.from(toolNamesSeen).filter((n) => /^mcp__.*__memory_/i.test(n) || /^memory_/i.test(n)),
+              resultState: memoryResultState,
+            },
             delegated: delegatedThisRun,
             stopReason: lastStopReason,
           },

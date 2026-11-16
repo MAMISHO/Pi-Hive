@@ -4,6 +4,7 @@ export const PROMPT_FILES = {
   SYSTEM_DEFAULT: 'system-default.md',
   CHIEF_DEFAULT: 'chief-default.md',
   WORKER_COORDINATION: 'worker-coordination.md',
+  MEMORY_EXPLORATION: 'memory-exploration.md',
 } as const;
 
 export const PROMPT_IDS = {

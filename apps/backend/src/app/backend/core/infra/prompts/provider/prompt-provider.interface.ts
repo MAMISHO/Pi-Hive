@@ -5,4 +5,5 @@ export interface IPromptProvider {
   getSystemDefault(): string;
   getChiefDefault(): string;
   getWorkerCoordination(): string;
+  getMemoryExploration(): string;
 }

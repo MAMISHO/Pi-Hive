@@ -11,6 +11,7 @@ export class PromptCatalogService {
   get systemDefaultContent(): string { return this.provider.getSystemDefault(); }
   get chiefDefaultContent(): string { return this.provider.getChiefDefault(); }
   get workerCoordinationContent(): string { return this.provider.getWorkerCoordination(); }
+  get memoryExplorationContent(): string { return this.provider.getMemoryExploration(); }
 
   renderChief(template: string, teamRoster: string): string {
     return (template || this.chiefDefaultContent).replace('{{TEAM_ROSTER}}', teamRoster);

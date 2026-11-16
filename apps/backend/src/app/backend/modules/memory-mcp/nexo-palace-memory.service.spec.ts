@@ -51,7 +51,7 @@ describe('NexoPalaceMemoryService', () => {
     expect(status.configured).toBe(false);
   });
 
-  it('keeps all Pi MCP servers available in sessions (including memory) regardless of preference flag', async () => {
+  it('filters only the memory MCP server when the effective agent preference is off', async () => {
     await writePiConfig({
       'nexo-palace': { command: 'npx' },
       docs: { command: 'node', args: ['docs-server'] },
@@ -60,7 +60,7 @@ describe('NexoPalaceMemoryService', () => {
     expect(options.extensionFactories.map((factory: any) => factory.name)).toEqual(['codemode', 'tool-search', 'mcp']);
     const ctx = { cwd: '/tmp/workspace', isProjectTrusted: () => false };
     const config = (options.extensionFactories[2] as any).loadConfig(ctx);
-    expect(config.servers.map((server: any) => server.name)).toEqual(['nexo-palace', 'docs']);
+    expect(config.servers.map((server: any) => server.name)).toEqual(['docs']);
   });
 
   it('keeps Pi MCP servers in a session and exposes memory tools directly', async () => {

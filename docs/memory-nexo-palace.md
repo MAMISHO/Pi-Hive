@@ -12,7 +12,9 @@ Pi-Hive permite que cada workspace y agente use Nexo-Palace como memoria externa
 ## Uso en sesiones
 
 - Pi-Hive usa la extensión MCP incluida en la SDK de Pi, que lee la configuración Pi y mantiene el transporte/conexión.
-- En una sesión con memoria efectiva, Pi-Hive limita la exposición del servidor detectado a `memory_query` y `memory_trace`; Pi conecta el servidor con exposición directa para verificar las tools al iniciar. Los demás servidores Pi mantienen su configuración normal.
+- En una sesión con memoria efectiva, Pi-Hive permite que Pi conecte el servidor detectado y exponga sus tools. Si la memoria no es efectiva para el agente, Pi-Hive excluye solo ese servidor de esa sesión; los demás servidores Pi mantienen su configuración normal.
+- Para recuperar contexto del proyecto, `memory_query` busca documentación, código, tests y convenciones. `memory_status` informa sobre el índice; `memory_trace` y `memory_path` sirven para relaciones concretas.
+- `memory_map` reindexa/actualiza la memoria y `memory_drift` analiza cambios recientes; no son consultas de contexto. `memory_record_decision` escribe una decisión. No invocarlas en tareas de exploración salvo petición explícita y política aplicable.
 - Si la preferencia no está activa, el servidor de memoria se excluye de esa sesión. No se alteran los archivos de configuración de Pi.
 - El prompt añade una instrucción breve: consultar solo cuando ayude a la tarea; prevalecen el estado persistido, gates, aprobaciones humanas y herramientas del harness.
 

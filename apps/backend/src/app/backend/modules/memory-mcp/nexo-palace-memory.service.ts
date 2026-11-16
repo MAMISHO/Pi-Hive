@@ -183,23 +183,34 @@ export class NexoPalaceMemoryService {
   }
 
   /**
-   * Keep Pi's built-in MCP/codemode/tool-search extensions and transports, but filter the detected memory server
-   * from this session when the workspace/agent preference is off. Other Pi MCP servers retain
-   * their existing configuration and behavior.
+   * Keep Pi's built-in MCP/codemode/tool-search extensions and transports. The detected
+   * memory server is connected only when this agent's effective preference is on; unrelated
+   * Pi MCP servers retain their existing configuration and behavior.
    */
   async resourceLoaderOptions(memoryEnabled: boolean) {
     const agentDir = await this.settings.resolvePiAgentDir();
     const loadMcpConfig = await this.getPiMcpConfigLoader();
-    // Expose all Pi-configured MCP servers (including memory) so every agent/session can use them.
+    // Pi owns MCP configuration and connections. Filter only its optional memory server by
+    // the effective agent preference; unrelated Pi servers retain their existing behavior.
     const extension = createMcpExtension({
       startupWaitMs: 5000,
       loadConfig: (ctx: any) => {
         const config = loadMcpConfig({ agentDir, cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
         return {
           ...config,
-          servers: config.servers.map((entry: any) => isMemoryServer(entry)
-            ? { ...entry, config: { ...entry.config, exposure: 'direct', toolExposure: { '*': 'direct', memory_query: 'direct', memory_trace: 'direct', memory_status: 'direct', memory_path: 'direct', memory_map: 'direct', memory_drift: 'direct', memory_record_decision: 'direct' } } }
-            : entry),
+          servers: config.servers.flatMap((entry: any) => {
+            if (!isMemoryServer(entry)) return [entry];
+            if (!memoryEnabled) return [];
+            return [{
+              ...entry,
+              config: {
+                ...entry.config,
+                description: entry.config.description || 'Memoria indexada del workspace: memory_query busca contenido; memory_trace y memory_path consultan relaciones; memory_status informa del índice. Las tools de mantenimiento o escritura no sustituyen búsquedas de contexto.',
+                exposure: 'direct',
+                toolExposure: { '*': 'direct', memory_query: 'direct', memory_trace: 'direct', memory_status: 'direct', memory_path: 'direct', memory_map: 'direct', memory_drift: 'direct', memory_record_decision: 'direct' },
+              },
+            }];
+          }),
         };
       },
     });

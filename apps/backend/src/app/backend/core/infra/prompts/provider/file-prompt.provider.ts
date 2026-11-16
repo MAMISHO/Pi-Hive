@@ -42,4 +42,8 @@ export class FilePromptProvider implements IPromptProvider {
   getWorkerCoordination(): string {
     return this.get(PROMPT_FILES.WORKER_COORDINATION);
   }
+
+  getMemoryExploration(): string {
+    return this.get(PROMPT_FILES.MEMORY_EXPLORATION);
+  }
 }

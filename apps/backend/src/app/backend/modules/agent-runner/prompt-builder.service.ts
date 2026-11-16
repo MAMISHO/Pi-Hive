@@ -86,13 +86,52 @@ export class PromptBuilderService {
 
     // Single canonical team section (avoid duplicating roster inside role templates/custom prompts)
     const equipoBlock = `[EQUIPO · otros agentes activos del workspace; nicknames exactos para delegar; tú eres "${agent.nickname}"]\n${teamRoster}`;
-    const memoryToolNames = Array.isArray((params as any).memoryToolNames) ? (params as any).memoryToolNames.filter(Boolean) : [];
-    const memoryToolsHint = memoryToolNames.length
-      ? ` Tools MCP disponibles: ${memoryToolNames.join(', ')}.`
-      : ' Si están disponibles, usa las tools MCP de memoria del proyecto (p.ej. memory_query/memory_trace o sus nombres mcp__nexo_palace__*).';
-    const memoryBlock = (params as any).memoryEffective
-      ? `\n[MEMORIA EXTERNA · Nexo-Palace]\n- Consulta la memoria mediante las tools MCP de Pi solo cuando aporte contexto necesario para la tarea.${memoryToolsHint}\n- La memoria es informativa; no sustituye el estado persistido del pipeline, gates, aprobaciones humanas ni las tools del harness.\n- Formula consultas breves y específicas y usa solo los resultados necesarios.`
-      : '';
+    const memoryToolNames: string[] = Array.isArray((params as any).memoryToolNames)
+      ? Array.from(new Set((params as any).memoryToolNames.map((name: any) => String(name || '').trim()).filter(Boolean)))
+      : [];
+    const pickTool = (...patterns: RegExp[]): string => {
+      for (const re of patterns) {
+        const found = memoryToolNames.find((name) => re.test(name));
+        if (found) return found;
+      }
+      return '';
+    };
+    const queryTool = pickTool(/(^|__)memory_query$/i);
+    const statusTool = pickTool(/(^|__)memory_status$/i);
+    const pathTool = pickTool(/(^|__)memory_path$/i);
+    const traceTool = pickTool(/(^|__)memory_trace$/i);
+    const memoryMapTool = pickTool(/(^|__)memory_map$/i);
+    const driftTool = pickTool(/(^|__)memory_drift$/i);
+    const queryName = queryTool || 'la herramienta de búsqueda de memoria expuesta (memory_query)';
+    const focusedTools = [pathTool, traceTool].filter(Boolean).join(' / ') || 'las herramientas de trazabilidad expuestas (memory_path / memory_trace)';
+    const statusHint = statusTool
+      ? `usa \`${statusTool}\` solo para conocer estado/cobertura del índice; no sustituye una búsqueda de contenido.`
+      : 'usa la herramienta de estado del índice expuesta solo para conocer cobertura; no sustituye una búsqueda de contenido.';
+    const maintenanceTools = [memoryMapTool, driftTool].filter(Boolean);
+    const mapHint = maintenanceTools.length
+      ? `no uses ${maintenanceTools.map((t) => `\`${t}\``).join(' ni ')} para recuperar contexto: son de mantenimiento/reindexado de la memoria.`
+      : 'no uses herramientas de mantenimiento/reindexado (p.ej. memory_map/memory_drift) para recuperar contexto.';
+    const writeTools = memoryToolNames.filter((name: string) => /(^|__)memory_record_decision$|record_decision|memory_write|_write$|_update$|_save$|_create$|_delete$|_put$/i.test(name));
+    const writeNote = writeTools.length
+      ? `- ${writeTools.join(', ')} puede modificar memoria: úsala solo si la tarea lo solicita explícitamente y la política existente lo permite; no es herramienta habitual de lectura/exploración.`
+      : '- No uses herramientas de escritura de memoria salvo petición explícita y política existente que lo permita.';
+    const exposedTools = memoryToolNames.length
+      ? memoryToolNames.join(', ')
+      : '(aún no identificadas; usa únicamente las herramientas de memoria efectivamente expuestas por esta sesión)';
+    let memoryBlock = '';
+    if ((params as any).memoryEffective) {
+      let skill = '';
+      try { skill = String(this.prompts.memoryExplorationContent || '').trim(); } catch { skill = ''; }
+      if (skill) {
+        memoryBlock = `\n${skill
+          .replace(/\{\{QUERY_TOOL\}\}/g, `\`${queryName}\``)
+          .replace(/\{\{FOCUSED_TOOLS\}\}/g, focusedTools)
+          .replace(/\{\{STATUS_HINT\}\}/g, statusHint)
+          .replace(/\{\{MAP_HINT\}\}/g, mapHint)
+          .replace(/\{\{WRITE_NOTE\}\}/g, writeNote)
+          .replace(/\{\{EXPOSED_TOOLS\}\}/g, exposedTools)}`;
+      }
+    }
 
     return [
       identity,

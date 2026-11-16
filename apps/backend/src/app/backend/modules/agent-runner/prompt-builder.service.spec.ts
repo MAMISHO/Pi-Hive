@@ -8,8 +8,9 @@ const worker: any = { id: 'worker-id', nickname: 'Alias-Now', role: 'WORKER', wo
 describe('PromptBuilderService migration prompt layers', () => {
   let builder: PromptBuilderService;
   beforeEach(() => {
+    const memorySkill = `[SKILL · Memoria inteligente del workspace (MCP)]\ntu primera llamada de herramienta debe ser {{QUERY_TOOL}} (nombre MCP completo), no ls/find/grep/read/bash.\nRelaciones: {{FOCUSED_TOOLS}}. {{STATUS_HINT}} {{MAP_HINT}}\nNo uses nombres cortos. Nunca ejecutes nombres MCP mediante bash.\nSi es insuficiente, refina (1-2) y luego fallback acotado.\n{{WRITE_NOTE}}\nHerramientas de memoria expuestas en esta sesión (nombre MCP completo): {{EXPOSED_TOOLS}}.`;
     builder = new PromptBuilderService({ get: async () => ({ id: 'ws', name: 'landing-template-harness', path: '/tmp/landing-template-harness', role_bindings: '{"orchestration":"worker-id","harness_engineering":"missing"}' } as any) } as any,
-      { systemDefaultContent: '[BASE] rule', chiefDefaultContent: '[CHIEF] rule', renderChief: (content: string) => content, renderWorkerCoordination: () => '[ROLE] rule' } as any);
+      { systemDefaultContent: '[BASE] rule', chiefDefaultContent: '[CHIEF] rule', memoryExplorationContent: memorySkill, renderChief: (content: string) => content, renderWorkerCoordination: () => '[ROLE] rule' } as any);
     jest.spyOn((builder as any), 'resolveSystemPrompt').mockResolvedValue('[BASE] rule');
   });
 
@@ -21,12 +22,32 @@ describe('PromptBuilderService migration prompt layers', () => {
     expect(prompt).toContain('orchestration → Alias-Now');
   });
 
-  it('includes concise external memory guidance only when effective', async () => {
+  it('injects memory exploration skill only when effective and generic', async () => {
     const without = await builder.buildSystem({ agent, team: [agent, worker], memoryEffective: false });
-    const withMem = await builder.buildSystem({ agent, team: [agent, worker], memoryEffective: true });
-    expect(without).not.toContain('Nexo-Palace');
-    expect(withMem).toContain('MEMORIA EXTERNA · Nexo-Palace');
-    expect(withMem).toContain('tools MCP de Pi');
+    const withMem = await builder.buildSystem({ agent, team: [agent, worker], memoryEffective: true, memoryToolNames: ['mcp__nexo_palace__memory_query','mcp__nexo_palace__memory_trace','mcp__nexo_palace__memory_status','mcp__nexo_palace__memory_path','mcp__nexo_palace__memory_map','mcp__nexo_palace__memory_drift'] });
+    expect(without).not.toContain('[SKILL · Memoria inteligente');
+    expect(withMem).toContain('[SKILL · Memoria inteligente');
+    expect(withMem).not.toContain('nexo-palace');
+    expect(withMem.match(/\[SKILL · Memoria inteligente/g)).toHaveLength(1);
+    expect(withMem).toContain('mcp__nexo_palace__memory_query');
+    expect(withMem).toContain('nombre MCP completo');
+    expect(withMem).toContain('primera llamada de herramienta debe ser');
+    expect(withMem).toContain('no ls/find/grep/read/bash');
+    expect(withMem).toContain('estado/cobertura del índice');
+    expect(withMem).toContain('mantenimiento/reindexado');
+    expect(withMem).toContain('fallback acotado');
+    expect(withMem).toContain('Nunca ejecutes nombres MCP mediante bash');
+    expect(withMem).not.toContain('{{QUERY_TOOL}}');
+  });
+
+  it('derives memory skill from runtime tool names and warns on write tools', async () => {
+    const withAlias = await builder.buildSystem({ agent, team: [agent, worker], memoryEffective: true, memoryToolNames: ['mcp__custom__memory_map','mcp__custom__memory_query','mcp__custom__memory_trace','mcp__custom__memory_record_decision'] });
+    expect(withAlias).toContain('mcp__custom__memory_map');
+    expect(withAlias).toContain('mcp__custom__memory_query');
+    expect(withAlias).toContain('mcp__custom__memory_record_decision');
+    expect(withAlias).toContain('mantenimiento/reindexado');
+    expect(withAlias).toContain('puede modificar memoria');
+    expect(withAlias).not.toContain('mcp__nexo_palace__');
   });
 
   it('keeps invalid/absent bindings compatible and rejects agents from other workspaces', () => {
@@ -95,17 +116,17 @@ describe('PromptBuilderService migration prompt layers', () => {
       isResumed: true, isDelegationResult: true, callbackContext: 'Complete the remaining workflow.' });
     expect(callback).toContain('solo ese tramo pendiente');
     expect(allowedToolsForTaskFlow('delegation_result', 'WORKER', true)).toContain('plan_delegation');
-    expect(allowedToolsForTaskFlow('delegation_result', 'WORKER', false)).not.toContain('plan_delegation');
-    expect(allowedToolsForTaskFlow('delegation_result', 'WORKER', false, true)).toEqual([]);
-    expect(allowedToolsForTaskFlow('delegation_result', 'CHIEF', false, true)).toEqual(['read', 'delegate_task']);
+    expect(allowedToolsForTaskFlow('delegation_result', 'WORKER', false)).toContain('plan_delegation');
+    expect(allowedToolsForTaskFlow('delegation_result', 'WORKER', false, true)).toEqual(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls', 'delegate_task', 'plan_delegation']);
+    expect(allowedToolsForTaskFlow('delegation_result', 'CHIEF', false, true)).toEqual(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls', 'delegate_task', 'plan_delegation']);
   });
 
   it('does not reopen a route that already reached a terminal state', () => {
     expect(canPlanDelegation({ flow: 'delegation_result', planState: null })).toBe(true);
-    expect(canPlanDelegation({ flow: 'delegation_result', planState: 'active' })).toBe(false);
-    expect(canPlanDelegation({ flow: 'delegation_result', planState: 'done' })).toBe(false);
-    expect(canPlanDelegation({ flow: 'delegation_progress', planState: null })).toBe(false);
-    expect(canPlanDelegation({ flow: 'direct', planState: null, explicitlyAddressedRecipient: true })).toBe(false);
+    expect(canPlanDelegation({ flow: 'delegation_result', planState: 'active' })).toBe(true);
+    expect(canPlanDelegation({ flow: 'delegation_result', planState: 'done' })).toBe(true);
+    expect(canPlanDelegation({ flow: 'delegation_progress', planState: null })).toBe(true);
+    expect(canPlanDelegation({ flow: 'direct', planState: null, explicitlyAddressedRecipient: true })).toBe(true);
   });
 
   it('selects the active direct request over stale inherited callback context', () => {
@@ -119,15 +140,16 @@ describe('PromptBuilderService migration prompt layers', () => {
     )).toBe('Ask Pam and add 100.');
   });
 
-  it('limits Chief to read and orchestration tools while preserving worker tools', () => {
-    expect(allowedToolsForTaskFlow('delegation_result', 'WORKER', true)).toEqual(['read', 'bash', 'edit', 'write', 'delegate_task', 'plan_delegation']);
-    expect(allowedToolsForTaskFlow('delegation_progress')).toEqual([]);
-    expect(allowedToolsForTaskFlow('direct')).toContain('plan_delegation');
-    expect(allowedToolsForTaskFlow('direct', 'CHIEF')).toEqual(['read', 'delegate_task', 'plan_delegation']);
-    expect(allowedToolsForTaskFlow('direct', 'CHIEF', false)).toEqual(['read', 'delegate_task']);
-    expect(allowedToolsForTaskFlow('delegation_result', 'CHIEF', false)).toEqual(['read', 'delegate_task']);
-    expect(allowedToolsForTaskFlow('delegation_result', 'CHIEF', true)).toEqual(['read', 'delegate_task', 'plan_delegation']);
-    expect(allowedToolsForTaskFlow('delegation_progress', 'CHIEF')).toEqual([]);
+  it('exposes all Pi-provided tools to every agent/session', () => {
+    const all = ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls', 'delegate_task', 'plan_delegation'];
+    expect(allowedToolsForTaskFlow('delegation_result', 'WORKER', true)).toEqual(all);
+    expect(allowedToolsForTaskFlow('delegation_progress')).toEqual(all);
+    expect(allowedToolsForTaskFlow('direct')).toEqual(all);
+    expect(allowedToolsForTaskFlow('direct', 'CHIEF')).toEqual(all);
+    expect(allowedToolsForTaskFlow('direct', 'CHIEF', false)).toEqual(all);
+    expect(allowedToolsForTaskFlow('delegation_result', 'CHIEF', false)).toEqual(all);
+    expect(allowedToolsForTaskFlow('delegation_result', 'CHIEF', true)).toEqual(all);
+    expect(allowedToolsForTaskFlow('delegation_progress', 'CHIEF')).toEqual(all);
   });
 
   it('resolves an explicitly named Chief recipient from the live roster', () => {

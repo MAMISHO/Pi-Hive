@@ -828,33 +828,50 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
     const children = ev?.children || [];
     const out: any[] = [];
     const toolIndex = new Map<string, number>();
+    let lastToolKey: string | null = null;
     for (const child of children) {
-      if (child?.kind === 'thinking') { out.push(child); continue; }
+      if (child?.kind === 'thinking') { lastToolKey = null; out.push(child); continue; }
       const raw = (child?.content && typeof child.content === 'object' && !Array.isArray(child.content)) ? child.content : this.tryParse(child?.content);
       const o: any = (raw && typeof raw === 'object') ? { ...raw } : {};
       // lift top-level fields that sometimes live outside content
       if (child?.toolName || child?.tool || child?.name) o.toolName = o.toolName || o.tool || o.name || child.toolName || child.tool || child.name;
       if (child?.toolCallId || child?.tool_call_id || child?.id) o.toolCallId = o.toolCallId || o.tool_call_id || o.id || child.toolCallId || child.tool_call_id || child.id;
-      if (child?.args != null && o.args == null && o.arguments == null) o.args = child.args;
-      const callId = o.toolCallId || o.tool_call_id || o.id;
-      if (!callId) { out.push(child); continue; }
-      const key = String(callId);
+      if (child?.args != null && o.args == null && o.arguments == null && o.input == null && o.parameters == null) o.args = child.args;
+      if (child?.resultSummary != null && o.resultSummary == null) o.resultSummary = child.resultSummary;
+      if (child?.phase && !o.phase) o.phase = child.phase;
+
+      let callId = o.toolCallId || o.tool_call_id || o.id;
+      let key = callId ? `id:${String(callId)}` : null;
+      // fallback: merge consecutive phases of same tool when no call id is present
+      if (!key) {
+        const nm = String(o.toolName || o.tool || o.name || '').trim();
+        if (nm && lastToolKey && lastToolKey.startsWith('name:') && lastToolKey === `name:${nm}`) {
+          key = lastToolKey;
+        } else if (nm) {
+          key = `name:${nm}:${out.length}`;
+        }
+      }
+
+      if (!key) { out.push(child); lastToolKey = null; continue; }
       const existingIdx = toolIndex.get(key);
       if (existingIdx == null) {
         toolIndex.set(key, out.length);
+        if (key.startsWith('name:') && !callId) lastToolKey = key.replace(/:\d+$/, '').includes(':name:') ? key : key; // keep merge window
+        lastToolKey = key;
         out.push({ ...child, content: JSON.stringify(o) });
       } else {
         const prev = this.tryParse(out[existingIdx].content) || {};
         const merged = {
           ...prev,
           ...o,
-          args: (o.args != null ? o.args : (o.arguments != null ? o.arguments : (prev.args != null ? prev.args : prev.arguments))),
-          resultSummary: (o.resultSummary != null ? o.resultSummary : prev.resultSummary),
+          args: (o.args != null ? o.args : (o.arguments != null ? o.arguments : (o.input != null ? o.input : (o.parameters != null ? o.parameters : (prev.args != null ? prev.args : (prev.arguments ?? prev.input ?? prev.parameters)))))),
+          resultSummary: (o.resultSummary != null ? o.resultSummary : (o.result != null ? o.result : (o.output != null ? o.output : prev.resultSummary))),
           phase: o.phase || prev.phase,
           toolName: o.toolName || o.tool || o.name || prev.toolName || prev.tool || prev.name,
           toolCallId: o.toolCallId || o.tool_call_id || o.id || prev.toolCallId || prev.tool_call_id || prev.id,
         };
         out[existingIdx] = { ...out[existingIdx], kind: child.kind || out[existingIdx].kind, content: JSON.stringify(merged) };
+        lastToolKey = key;
       }
     }
     return out;
@@ -869,15 +886,16 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
       o = { ...o };
     }
     if (ev?.toolName || ev?.tool || ev?.name) o.toolName = o.toolName || o.tool || o.name || ev.toolName || ev.tool || ev.name;
-    if (ev?.args != null && o.args == null && o.arguments == null) o.args = ev.args;
+    if (ev?.args != null && o.args == null && o.arguments == null && o.input == null && o.parameters == null) o.args = ev.args;
     if (ev?.resultSummary != null && o.resultSummary == null) o.resultSummary = ev.resultSummary;
     if (ev?.phase && !o.phase) o.phase = ev.phase;
+    if (ev?.toolCallId && !o.toolCallId && !o.tool_call_id) o.toolCallId = ev.toolCallId;
     return o;
   }
 
   toolEventTitle(ev: any): string {
     const o = this.toolPayload(ev);
-    const name = o.toolName || o.tool || o.name || 'tool';
+    const name = String(o.toolName || o.tool || o.name || 'tool (desconocida)');
     const phase = o.phase ? ` · ${o.phase}` : '';
     let args = o.args != null ? o.args : (o.arguments != null ? o.arguments : (o.input != null ? o.input : (o.parameters != null ? o.parameters : null)));
     if (typeof args === 'string') args = this.tryParse(args) || args;
@@ -890,15 +908,16 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
       else if (args.goal) hint = ` — ${String(args.goal).slice(0, 120)}`;
       else {
         const keys = Object.keys(args);
-        if (keys.length) hint = ` — ${keys.slice(0, 2).map(k => `${k}: ${this.compactArg(args[k])}`).join(', ')}`;
+        if (keys.length) hint = ` — ${keys.slice(0, 3).map(k => `${k}: ${this.compactArg(args[k])}`).join(', ')}`;
       }
     } else if (typeof args === 'string' && args.trim()) {
       hint = ` — ${args.slice(0, 120)}`;
-    } else if (Array.isArray(args) && args.length) {
-      hint = ` — [${args.length} args]`;
+    } else if (Array.isArray(args)) {
+      hint = args.length ? ` — [${args.length} args]` : ' — {}';
     }
-    if (!hint && (o.resultSummary || o.result || o.output) != null && String(o.resultSummary || o.result || o.output).trim()) {
-      hint = ' — (resultado)';
+    if (!hint) {
+      const resVal = o.resultSummary ?? o.result ?? o.output ?? o.error ?? o.message;
+      if (resVal != null && String(resVal).trim()) hint = ' — (resultado)';
     }
     return `${name}${phase}${hint}`;
   }
@@ -911,31 +930,48 @@ export class SwarmMonitorComponent implements OnInit, OnDestroy, AfterViewInit {
       let args = o.args != null ? o.args : (o.arguments != null ? o.arguments : (o.input != null ? o.input : (o.parameters != null ? o.parameters : null)));
       if (typeof args === 'string') args = this.tryParse(args) || args;
       let detail = '';
-      if (args != null) {
+      const hasArgs = args != null && !(typeof args === 'object' && !Array.isArray(args) && Object.keys(args).length === 0) && !(Array.isArray(args) && args.length === 0) && !(typeof args === 'string' && !args.trim());
+      if (hasArgs) {
         if (typeof args === 'object' && !Array.isArray(args)) {
           if (args.command) {
             detail = `$ ${args.command}` + (args.cwd ? `\n(cwd: ${args.cwd})` : '');
           } else {
             const keys = Object.keys(args);
-            detail = keys.length ? keys.map(k => `${k}: ${this.compactArg(args[k])}`).join('\n') : JSON.stringify(args, null, 2);
+            detail = keys.length ? keys.map(k => `${k}: ${this.formatArgValue(args[k])}`).join('\n') : '';
           }
+        } else if (Array.isArray(args)) {
+          detail = args.map((a, i) => `${i}: ${this.formatArgValue(a)}`).join('\n');
         } else {
-          detail = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
+          detail = typeof args === 'string' ? args : this.formatArgValue(args);
         }
       }
-      const resVal = o.resultSummary ?? o.result ?? o.output;
-      const res = resVal != null && String(resVal).trim() ? `→ ${String(resVal).slice(0, 400)}` : '';
+
+      const resVal = o.resultSummary ?? o.result ?? o.output ?? o.error ?? (o.isError ? o.message : null);
+      let res = '';
+      if (resVal != null) {
+        const rs = typeof resVal === 'string' ? resVal : this.formatArgValue(resVal, 400);
+        if (String(rs).trim()) res = `${o.isError || o.error ? '✗' : '→'} ${String(rs).slice(0, 400)}`;
+      }
+
       const parts = [detail, res].filter(Boolean);
       if (parts.length) return parts.join('\n');
+
+      // fallback: show remaining payload (excluding bookkeeping) instead of "(sin detalles)"
       const fallback: any = { ...o };
       ['order','phase','toolName','tool','name','toolCallId','tool_call_id','id'].forEach(k => delete fallback[k]);
-      const rest = JSON.stringify(fallback, null, 2);
-      if (rest && rest !== '{}') return rest;
-      const nm = o.toolName || o.tool || o.name;
-      return nm ? String(nm) : '(sin detalles)';
+      const rest = this.formatArgValue(fallback, 600);
+      if (rest && rest !== '{}' && rest !== 'null') return rest;
+      if (o.phase) return `(${o.phase})`;
+      return '(sin detalles)';
     }
     if (typeof raw === 'string') return raw;
-    try { return JSON.stringify(raw, null, 2); } catch { return String(raw ?? ''); }
+    return this.formatArgValue(raw, 600) || String(raw ?? '');
+  }
+
+  private formatArgValue(v: any, max = 400): string {
+    if (v == null) return String(v);
+    if (typeof v === 'string') return v.length > max ? v.slice(0, max) + '…' : v;
+    try { const s = JSON.stringify(v, null, 2); return s.length > max ? s.slice(0, max) + '…' : s; } catch { return String(v); }
   }
   private compactArg(v: any): string {
     if (v == null) return String(v);
