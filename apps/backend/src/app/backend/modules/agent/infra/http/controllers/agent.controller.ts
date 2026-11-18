@@ -224,7 +224,7 @@ export class AgentController {
     return this.decorate(created);
   }
 
-  @Put(':id/stop') async stop(@Param('id') id: string) { agentEventEmitter.emit('agent:stop', { agentId: id, reason: 'user_stop', notifySender: false }); return { stopped: true }; }
+  @Put(':id/stop') async stop(@Param('id') id: string) { try { const stopped = await this.agentRunner.stopAgent(id, { reason: 'user_stop', notifySender: false }); agentEventEmitter.emit('agent:stop', { agentId: id, reason: 'user_stop', notifySender: false }); return { stopped: !!stopped }; } catch (e) { console.error('[agents][STOP] failed', id, e); agentEventEmitter.emit('agent:stop', { agentId: id, reason: 'user_stop', notifySender: false }); return { stopped: false }; } }
   @Put(':id/session/clear') async clearSession(@Param('id') id: string) { agentEventEmitter.emit('agent:session:clear', id); return { ok: true }; }
   @Put(':id/session/compact') async compactSession(@Param('id') id: string) { agentEventEmitter.emit('agent:session:compact', id); return { ok: true }; }
   @Put(':id/session/resume') async resumeSession(@Param('id') id: string) { agentEventEmitter.emit('agent:session:resume', id); return { ok: true }; }

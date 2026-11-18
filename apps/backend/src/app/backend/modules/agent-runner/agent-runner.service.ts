@@ -41,6 +41,7 @@ export class AgentRunnerService implements OnModuleInit {
   private systemPromptHashByAgent = new Map<string, string>(); // avoid reapplying unchanged system prompt on resumed sessions
   private cachedRuntime: any = null;
   private cachedRuntimeAgentDir: string | null = null;
+  private runAborters = new Map<string, { promise: Promise<string>; resolve: (reason: string) => void }>();
 
   constructor(
     @Inject(IAgentRepositoryToken) private agentRepository: IAgentRepository,
@@ -131,6 +132,8 @@ export class AgentRunnerService implements OnModuleInit {
     console.log(`[AgentRunner] stopAgent ${agentId} reason=${reason}`);
     const session = this.activeSessions.get(agentId);
     let stoppedSomething = !!session;
+    const aborter = this.runAborters.get(agentId);
+    if (aborter) { try { aborter.resolve(reason); } catch {} }
     if (session) {
       try { await session.abort(); } catch (e) { console.error(`[AgentRunner] Error aborting ${agentId}:`, e); }
       this.activeSessions.delete(agentId);
@@ -204,6 +207,34 @@ export class AgentRunnerService implements OnModuleInit {
       console.log(`[AgentRunner] startup: ${pending.length} pending tasks`);
       for (const task of pending) this.handlePendingTask(task).catch(console.error);
     } catch (err) { console.error('Error loading pending tasks:', err); }
+
+    // Hot reaper: recover orphaned PROCESSING tasks (no in-memory run/session) so UI/stop don't get stuck after crashes/hangs.
+    setInterval(() => { this.reapOrphanedProcessingTasks().catch((e) => console.warn('[AgentRunner] reaper failed', e)); }, 60_000).unref?.();
+  }
+
+  private async reapOrphanedProcessingTasks(): Promise<void> {
+    let processing: any[] = [];
+    try { processing = await this.taskQueueRepository.findByStatus('PROCESSING' as any); } catch { return; }
+    const now = Date.now();
+    for (const t of processing || []) {
+      const agentId = String((t as any).receiver_agent_id || '');
+      if (!agentId || agentId === 'user') continue;
+      const hasLiveRun = this.activeSessions.has(agentId) || this.processingAgents.has(agentId) || this.currentTaskByAgent.has(agentId);
+      if (hasLiveRun) continue;
+      const created = (t as any).created_at ? new Date((t as any).created_at).getTime() : 0;
+      const ageMs = created ? (now - created) : 0;
+      if (ageMs < 90_000) continue; // grace period (avoid racing fresh dispatch)
+      try {
+        const fresh = await this.taskQueueRepository.get(t.id);
+        if (!fresh || fresh.status !== 'PROCESSING') continue;
+        (fresh as any).status = 'PENDING';
+        (fresh as any).response = ((fresh as any).response ? `${(fresh as any).response}\n` : '') + '⏳ Recuperada automáticamente: ejecución huérfana detectada tras reinicio/hang.';
+        await this.taskQueueRepository.update(fresh);
+        console.warn(`[AgentRunner] reaper recovered orphaned PROCESSING task=${fresh.id} agent=${agentId} ageMs=${ageMs}`);
+      } catch (e) {
+        console.warn(`[AgentRunner] reaper could not recover task=${t.id}`, e);
+      }
+    }
   }
 
   private isCallbackFlow(task: any): boolean {
@@ -644,17 +675,26 @@ export class AgentRunnerService implements OnModuleInit {
             const requesterLabel = (task as any).sender_agent_id === 'user'
               ? 'user (solicitante, NO es agente del roster)'
               : (sender?.nickname ? `${sender.nickname}${sender.role ? ` (${sender.role})` : ''} (solicitante, NO es agente del roster)` : 'solicitante (NO es agente del roster)');
-            const res = await delegationPlannerService.planOneShot({
-              model: agentModel,
-              runtime: agentRuntime,
-              userTask: plannerInputTask,
-              roster: rosterForPlanner,
-              plannerNickname: agent.nickname,
-              requesterLabel,
-              cwd,
-              idleTimeoutMs: 45_000,
-              hardMaxMs: 300_000,
-            });
+            let externalAbort = false;
+            const abortWatcher = (this.runAborters.get(agent.id)?.promise || new Promise<string>(() => {})).then(() => { externalAbort = true; return { ok: false, reason: 'planner_aborted', reason_detail: 'run_aborted', schema: null, nodes: [], parada: null, plannerMs: 0 } as any; });
+            const res = await Promise.race([
+              delegationPlannerService.planOneShot({
+                model: agentModel,
+                runtime: agentRuntime,
+                userTask: plannerInputTask,
+                roster: rosterForPlanner,
+                plannerNickname: agent.nickname,
+                requesterLabel,
+                cwd,
+                idleTimeoutMs: 45_000,
+                hardMaxMs: 300_000,
+              }),
+              abortWatcher,
+            ]) as any;
+            if (externalAbort || res?.reason === 'planner_aborted') {
+              traceService.record({ ...runCtx, eventType: 'delegation_planned', eventData: { ok: false, reason: 'planner_aborted', reason_detail: 'run_aborted' } }).catch(() => {});
+              return { content: [{ type: 'text' as const, text: 'Planificación de delegación cancelada (stop).'}], details: { ok: false, reason: 'planner_aborted' } } as any;
+            }
             const plannerMs = res.plannerMs ?? 0;
             const plannerModel = agentModelRaw;
             const firstActivityMs = (res as any).firstActivityMs ?? null;
@@ -805,7 +845,9 @@ export class AgentRunnerService implements OnModuleInit {
         this.trace.record({ runId, agentId: agent.id, eventType: 'memory_state', taskId: task.id, workspaceId,
           eventData: { effective: memoryState.effective, reason: memoryState.reason, globalEnabled: memoryState.globalEnabled, configured: memoryState.configured, available: memoryState.available, workspaceEnabled: memoryState.workspaceEnabled, agentEnabled: memoryState.agentEnabled } }).catch(() => {});
       }
-      const memoryToolNamesSeed = memoryEffective ? ['memory_query', 'memory_trace', 'memory_status', 'memory_path'] : [];
+      const memoryToolNamesSeed = memoryEffective
+        ? ['mcp__nexo_palace__memory_query','mcp__nexo_palace__memory_trace','mcp__nexo_palace__memory_status','mcp__nexo_palace__memory_path','mcp__nexo_palace__memory_map','mcp__nexo_palace__memory_drift','mcp__nexo_palace__memory_record_decision']
+        : [];
       let memoryToolNames = [...memoryToolNamesSeed];
       let systemPrompt = await this.promptBuilder.buildSystem({ agent, team: availableAgents, memoryEffective, memoryToolNames });
       let systemPromptHash = createHash('sha1').update(String(systemPrompt || '')).digest('hex');
@@ -927,6 +969,75 @@ export class AgentRunnerService implements OnModuleInit {
         agentEventEmitter.emit('agent:run:warning', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'model_fallback', message: modelFallbackMessage, emittedAt: Date.now() });
         agentEventEmitter.emit('agent:run:model', { runId, agentId: agent.id, taskId: task.id, state: 'fallback', provider: resolved.provider, modelId: resolved.modelId, message: modelFallbackMessage, emittedAt: Date.now() });
       }
+      let memoryRuntimeChecked = false;
+      let mcpToolsActivated = false;
+      let systemPromptSyncedWithTools = false;
+      const activateLoadedMcpTools = async (force = false): Promise<string[]> => {
+        if (typeof (session as any).getAllTools !== 'function') return [] as string[];
+        try {
+          const allNames: string[] = (session as any).getAllTools().map((tool: any) => String(tool?.name || '')).filter(Boolean);
+          if (!allNames.length) return [] as string[];
+          const needsActivation = !mcpToolsActivated || force;
+          if (needsActivation) {
+            // The Pi SDK allowlist set at session creation (_allowedTools from opts.tools) blocks
+            // direct MCP tools from activation (_isActivatable), so they never reach the model even
+            // when registered by extensions. Clear the allowlist and activate the full registered set
+            // so every Pi/MCP tool is exposed to the agent session/model.
+            try { if ('_allowedTools' in session) (session as any)._allowedTools = undefined; } catch {}
+            if (typeof (session as any)._setActiveTools === 'function') (session as any)._setActiveTools(allNames);
+            else if (typeof (session as any).setActiveToolsByName === 'function') (session as any).setActiveToolsByName(allNames);
+            mcpToolsActivated = true;
+          }
+          const activeTools: string[] = typeof (session as any).getActiveToolNames === 'function' ? (session as any).getActiveToolNames() : allNames;
+          // If memory is effective, sync skill/prompt with ACTUAL exposed MCP tool names (alias/prefix can vary).
+          if (memoryEffective) {
+            const runtimeMemoryTools = Array.from(new Set(allNames.filter((name: string) => /^mcp__.*__memory_/i.test(name) || /^memory_/i.test(name))));
+            if (runtimeMemoryTools.length) {
+              const same = runtimeMemoryTools.length === memoryToolNames.length && runtimeMemoryTools.every((n) => memoryToolNames.includes(n));
+              if (!same || !systemPromptSyncedWithTools) {
+                memoryToolNames = runtimeMemoryTools;
+                try {
+                  systemPrompt = await this.promptBuilder.buildSystem({ agent, team: availableAgents, memoryEffective, memoryToolNames });
+                  systemPromptHash = createHash('sha1').update(String(systemPrompt || '')).digest('hex');
+                  this.applySystemPrompt(session, systemPrompt);
+                } catch {}
+                systemPromptSyncedWithTools = true;
+              }
+            } else if (!systemPromptSyncedWithTools) {
+              try { this.applySystemPrompt(session, systemPrompt); } catch {}
+              systemPromptSyncedWithTools = true;
+            }
+          }
+          if (needsActivation || force) {
+            this.trace.record({ runId, agentId: agent.id, eventType: 'session_tools_activated', taskId: task.id, workspaceId,
+              eventData: { activeTools, allTools: allNames } }).catch(() => {});
+          }
+          return allNames;
+        } catch (e) {
+          console.warn('[AgentRunner] failed to activate loaded MCP/session tools', e);
+          return [] as string[];
+        }
+      };
+
+      // Pre-activate MCP/tools and sync memory skill with ACTUAL exposed MCP names before first prompt
+      // so the model catalog and skill list invocable memory tools on turn 1.
+      try {
+        let loadedToolNames = await activateLoadedMcpTools(true);
+        const hasMemory = (names: string[]) => (names || []).some((n: string) => /^mcp__.*__memory_/i.test(n) || /^memory_/i.test(n));
+        if (memoryEffective && !hasMemory(loadedToolNames)) {
+          await new Promise((r) => setTimeout(r, 1500));
+          loadedToolNames = await activateLoadedMcpTools(true);
+        }
+        const runtimeMemoryTools = Array.from(new Set((loadedToolNames || []).filter((n: string) => /^mcp__.*__memory_/i.test(n) || /^memory_/i.test(n))));
+        if (memoryEffective && runtimeMemoryTools.length) {
+          memoryToolNames = runtimeMemoryTools;
+          try {
+            systemPrompt = await this.promptBuilder.buildSystem({ agent, team: availableAgents, memoryEffective, memoryToolNames });
+            systemPromptHash = createHash('sha1').update(String(systemPrompt || '')).digest('hex');
+            systemPromptSyncedWithTools = true;
+          } catch {}
+        }
+      } catch {}
       if (!skipSystemReapply) this.applySystemPrompt(session, systemPrompt);
       try {
         const desiredEffort = String((agent as any).thinkingLevel || (agent as any)?.task_state?.thinkingLevel || 'low');
@@ -953,6 +1064,15 @@ export class AgentRunnerService implements OnModuleInit {
       let toolCallsTotal = 0;
       let retryNudged = false;
       let discardStreamingEvents = false;
+      let lastActivityAt = Date.now();
+      let lastActivityType = 'prompt_start';
+      let turnTimedOut: 'idle' | 'max' | false = false;
+      let lastObservedRunEvent: string | null = 'prompt_start';
+      let activeToolExecutions = 0;
+      const markRunActivity = (type: string) => { if (!type) return; lastActivityAt = Date.now(); lastActivityType = type; lastObservedRunEvent = type; };
+      let abortResolve!: (reason: string) => void;
+      const abortPromise = new Promise<string>((resolve) => { abortResolve = resolve; });
+      this.runAborters.set(agent.id, { promise: abortPromise, resolve: abortResolve });
       const runUsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, costFromProvider: false };
       let usageTurns = 0;
       const accumulateUsage = (u: any) => {
@@ -1067,51 +1187,8 @@ export class AgentRunnerService implements OnModuleInit {
         for (let i = msgs.length - 1; i >= 0; i--) { const m = msgs[i]; if (m?.role === 'assistant') { if (m.stopReason) lastStopReason = m.stopReason; if (m.errorMessage) lastErrorMessage = m.errorMessage; } }
       };
 
-      let memoryRuntimeChecked = false;
-      let mcpToolsActivated = false;
-      let systemPromptSyncedWithTools = false;
-      const activateLoadedMcpTools = async (force = false): Promise<string[]> => {
-        if (typeof (session as any).getAllTools !== 'function') return [] as string[];
-        try {
-          const allNames: string[] = (session as any).getAllTools().map((tool: any) => String(tool?.name || '')).filter(Boolean);
-          if (!allNames.length) return [] as string[];
-          const needsActivation = !mcpToolsActivated || force;
-          if (needsActivation) {
-            // The Pi SDK allowlist set at session creation (_allowedTools from opts.tools) blocks
-            // direct MCP tools from activation (_isActivatable), so they never reach the model even
-            // when registered by extensions. Clear the allowlist and activate the full registered set
-            // so every Pi/MCP tool is exposed to the agent session/model.
-            try { if ('_allowedTools' in session) (session as any)._allowedTools = undefined; } catch {}
-            if (typeof (session as any)._setActiveTools === 'function') (session as any)._setActiveTools(allNames);
-            else if (typeof (session as any).setActiveToolsByName === 'function') (session as any).setActiveToolsByName(allNames);
-            mcpToolsActivated = true;
-          }
-          const activeTools: string[] = typeof (session as any).getActiveToolNames === 'function' ? (session as any).getActiveToolNames() : allNames;
-          // If memory is effective, prefer the actual memory MCP tool names exposed by the session
-          // (server alias/prefix can vary) and keep the session system prompt in sync once.
-          if (memoryEffective && !systemPromptSyncedWithTools) {
-            const runtimeMemoryTools = Array.from(new Set(allNames.filter((name: string) => /^mcp__.*__memory_/i.test(name) || /^memory_/i.test(name))));
-            if (runtimeMemoryTools.length) {
-              memoryToolNames = runtimeMemoryTools;
-              try {
-                systemPrompt = await this.promptBuilder.buildSystem({ agent, team: availableAgents, memoryEffective, memoryToolNames });
-                systemPromptHash = createHash('sha1').update(String(systemPrompt || '')).digest('hex');
-              } catch {}
-            }
-            try { this.applySystemPrompt(session, systemPrompt); } catch {}
-            systemPromptSyncedWithTools = true;
-          }
-          if (needsActivation || force) {
-            this.trace.record({ runId, agentId: agent.id, eventType: 'session_tools_activated', taskId: task.id, workspaceId,
-              eventData: { activeTools, allTools: allNames } }).catch(() => {});
-          }
-          return allNames;
-        } catch (e) {
-          console.warn('[AgentRunner] failed to activate loaded MCP/session tools', e);
-          return [] as string[];
-        }
-      };
       const unsubscribe = session.subscribe((event: any) => {
+        if (event?.type) markRunActivity(String(event.type));
         // Activate all Pi/MCP tools (clearing SDK allowlist) so direct MCP tools reach the model.
         // Run on early lifecycle events; MCP direct tools can finish registering around these points.
         if (event?.type === 'before_agent_start' || event?.type === 'agent_start' || event?.type === 'turn_start') {
@@ -1144,8 +1221,8 @@ export class AgentRunnerService implements OnModuleInit {
           if (ame.error) { runError = String(ame.error?.message || ame.error); lastErrorMessage = runError; }
         }
         if (event.type === 'text_delta' && event.delta) { if (discardStreamingEvents) return; flushThinking().catch(() => {}); assistantText += event.delta; agentEventEmitter.emit('agent:stream:text', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, delta: event.delta, kind: 'text', emittedAt: Date.now() }); }
-        if (event.type === 'tool_execution_start') { if (discardStreamingEvents) return; toolCallsTotal++; flushThinking().catch(() => {}); noteToolCall(event.toolName, 'tool_execution_start', event.toolCallId); const s = JSON.stringify({ tool: event.toolName, args: event.args }); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(event.toolName||''), s).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'start', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); saveToolEvent('start', { toolName: event.toolName, toolCallId: event.toolCallId, args: event.args }).catch(() => {}); }
-        if (event.type === 'tool_execution_end') { if (discardStreamingEvents || shouldSkipToolExecEnd(event.toolCallId)) return; const resultSummaryFull = toResultSummary(event.result); noteToolResult(event.toolName, !!event.isError, resultSummaryFull); this.trace.toolResult(runId, agent.id, workspaceId, task.id, String(event.toolName||''), !!event.isError, resultSummaryFull.length).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: event.isError ? 'error' : 'end', toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: event.isError ? resultSummaryFull.slice(0, 300) : undefined, emittedAt: Date.now() }); saveToolEvent(event.isError ? 'error' : 'end', { toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: resultSummaryFull, isError: !!event.isError }).catch(() => {}); }
+        if (event.type === 'tool_execution_start') { if (discardStreamingEvents) return; activeToolExecutions++; toolCallsTotal++; flushThinking().catch(() => {}); noteToolCall(event.toolName, 'tool_execution_start', event.toolCallId); const s = JSON.stringify({ tool: event.toolName, args: event.args }); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(event.toolName||''), s).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'start', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); saveToolEvent('start', { toolName: event.toolName, toolCallId: event.toolCallId, args: event.args }).catch(() => {}); }
+        if (event.type === 'tool_execution_end') { if (discardStreamingEvents || shouldSkipToolExecEnd(event.toolCallId)) return; activeToolExecutions = Math.max(0, activeToolExecutions - 1); markRunActivity('tool_execution_end'); const resultSummaryFull = toResultSummary(event.result); noteToolResult(event.toolName, !!event.isError, resultSummaryFull); this.trace.toolResult(runId, agent.id, workspaceId, task.id, String(event.toolName||''), !!event.isError, resultSummaryFull.length).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: event.isError ? 'error' : 'end', toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: event.isError ? resultSummaryFull.slice(0, 300) : undefined, emittedAt: Date.now() }); saveToolEvent(event.isError ? 'error' : 'end', { toolName: event.toolName, toolCallId: event.toolCallId, resultSummary: resultSummaryFull, isError: !!event.isError }).catch(() => {}); }
         if (event.type === 'tool_call' && event.toolName) { if (discardStreamingEvents) return; flushThinking().catch(() => {}); const s = JSON.stringify({ tool: event.toolName, args: event.args }); this.trace.toolCall(runId, agent.id, workspaceId, task.id, String(event.toolName||''), s).catch(() => {}); agentEventEmitter.emit('agent:stream:tool', { agentId: agent.id, workspaceId, taskId: task.id, runId, seq: ++seq, phase: 'call', toolName: event.toolName, toolCallId: event.toolCallId, args: event.args, emittedAt: Date.now() }); saveToolEvent('call', { toolName: event.toolName, toolCallId: event.toolCallId, args: event.args }).catch(() => {}); }
         if (event.type === 'agent_end') { willRetry = !!event.willRetry; pickAssistantMeta(event); flushThinking().catch(() => {}); }
         if (event.type === 'agent_settled') { settledAborted = !!event.aborted; }
@@ -1161,11 +1238,57 @@ export class AgentRunnerService implements OnModuleInit {
         lastErrorMessage = null;
         willRetry = false;
         settledAborted = false;
+        markRunActivity('prompt_send');
+        const idleMs = 120_000; // no progress (stream/tool/lifecycle) for 2 min
+        const hardMaxMs = 600_000; // absolute cap 10 min per prompt
+        const promptStartedAt = Date.now();
+        let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+        let timeoutResolve: ((v: string) => void) | null = null;
+        const timeoutPromise = new Promise<string>((resolve) => {
+          timeoutResolve = resolve;
+          const tick = () => {
+            if (turnTimedOut) return;
+            const now = Date.now();
+            if (now - promptStartedAt >= hardMaxMs) { turnTimedOut = 'max'; resolve('timeout_max'); return; }
+            const idleRef = activeToolExecutions > 0 ? now : lastActivityAt;
+            if (activeToolExecutions === 0 && now - idleRef >= idleMs) { turnTimedOut = 'idle'; resolve('timeout_idle'); return; }
+            timeoutHandle = setTimeout(tick, 1000);
+          };
+          timeoutHandle = setTimeout(tick, 1000);
+        });
+        const promptPromise = session.prompt(text)
+          .then(() => 'done')
+          .catch((e: any) => {
+            runError = runError || String(e?.message || e);
+            console.error(`[AgentRunner] prompt error task=${task.id} run=${runId}:`, e);
+            return 'error';
+          });
+        const abortWatch = abortPromise.then((r) => r === 'user_stop' ? 'aborted' : `aborted:${r}`);
+        let outcome = 'done';
         try {
-          await session.prompt(text);
-        } catch (e: any) {
-          runError = runError || String(e?.message || e);
-          console.error(`[AgentRunner] prompt error task=${task.id} run=${runId}:`, e);
+          outcome = await Promise.race([promptPromise, timeoutPromise, abortWatch]);
+        } finally {
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+          timeoutResolve = null;
+        }
+        if (outcome === 'timeout_idle' || outcome === 'timeout_max' || outcome === 'aborted' || String(outcome).startsWith('aborted:')) {
+          const isTimeout = outcome === 'timeout_idle' || outcome === 'timeout_max';
+          try { await session.abort?.(); } catch {}
+          // let promptPromise settle to avoid unhandled rejection paths
+          promptPromise.catch(() => {});
+          if (isTimeout) {
+            const kind = outcome === 'timeout_idle' ? 'idle' : 'max';
+            lastStopReason = `timeout_${kind}`;
+            const idleForMs = Date.now() - lastActivityAt;
+            const elapsedMs = Date.now() - promptStartedAt;
+            runError = runError || `Turno sin progreso (${kind}): sin actividad ${Math.round(idleForMs / 1000)}s (último evento: ${lastActivityType}), transcurridos ${Math.round(elapsedMs / 1000)}s`;
+            this.trace.record({ runId, agentId: agent.id, eventType: `turn_timeout_${kind}`, taskId: task.id, workspaceId, eventData: { kind, idleMs, hardMaxMs, idleForMs, elapsedMs, lastActivityType, lastObservedRunEvent } }).catch(() => {});
+            agentEventEmitter.emit('agent:run:error', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: `turn_timeout_${kind}`, message: runError, emittedAt: Date.now() });
+            console.warn(`[AgentRunner] turn timeout ${kind} task=${task.id} run=${runId} idleForMs=${idleForMs} last=${lastActivityType}`);
+          } else {
+            settledAborted = true;
+            lastStopReason = lastStopReason || 'user_stop';
+          }
         }
         await flushThinking();
       };
@@ -1174,7 +1297,7 @@ export class AgentRunnerService implements OnModuleInit {
       let text = assistantText.trim();
       stopped = !this.activeSessions.has(agent.id) || settledAborted;
       // Guard: model exhausted output (stopReason=length) with no actionable result and no delegation -> 1 concise nudge retry
-      if (!stopped && !runError && !lastErrorMessage && lastStopReason !== 'error' && lastStopReason === 'length' && !text && !delegatedThisRun) {
+      if (!stopped && !turnTimedOut && !runError && !lastErrorMessage && lastStopReason !== 'error' && lastStopReason === 'length' && !text && !delegatedThisRun) {
         retryNudged = true;
         console.warn(`[AgentRunner] output_length_no_action task=${task.id} run=${runId} agent=${agent.nickname} (nudging once)`);
         this.trace.record({ runId, agentId: agent.id, eventType: 'output_length_no_action', taskId: task.id, workspaceId, eventData: { delegatedThisRun, toolCallsTotal, retry: true } }).catch(() => {});
@@ -1501,6 +1624,7 @@ export class AgentRunnerService implements OnModuleInit {
       agentEventEmitter.emit('agent:run:error', { agentId: agent.id, workspaceId, taskId: task.id, runId, code: 'runner_error', message: String(error?.message || error), emittedAt: Date.now() });
       agentEventEmitter.emit('agent:run:finished', { agentId: agent.id, workspaceId, taskId: task.id, runId, outcome: 'error', errorMessage: String(error?.message || error), willRetry: false, aborted: false, emittedAt: Date.now() });
     } finally {
+      this.runAborters.delete(agent.id);
       // AgentRunner owns a short-lived SDK session per task. Shut down extension
       // handlers even when prompt setup or execution fails, then release listeners.
       try {

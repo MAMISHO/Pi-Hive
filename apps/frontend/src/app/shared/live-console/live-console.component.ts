@@ -33,12 +33,12 @@ import { Subscription } from 'rxjs';
             @if (e.kind === 'thinking') {
               <div class="log-entry thinking" [class.collapsed]="thinkingCollapsed">
                 <div class="entry-label think">thinking</div>
-                <pre class="thinking-content">{{ e.text }}</pre>
+                <pre class="thinking-content">{{ compactVal(e.text, 4000) }}</pre>
               </div>
             } @else if (e.kind === 'text') {
               <div class="log-entry output">
                 <div class="entry-label">output</div>
-                <pre class="output-content">{{ e.text }}</pre>
+                <pre class="output-content">{{ compactVal(e.text, 4000) }}</pre>
               </div>
             } @else if (e.kind === 'tool') {
               <div class="log-entry tool">
@@ -118,12 +118,13 @@ export class LiveConsoleComponent implements OnInit, OnDestroy {
 
   formatToolDetail(e: LiveLogEntry): string {
     const name = e.toolName || 'tool';
+    const phase = e.phase ? ` (${e.phase})` : '';
     const args = e.args;
-    const summary = e.resultSummary ? `\n→ ${String(e.resultSummary).slice(0, 240)}` : '';
-    if (args == null) return `${name}${summary}`;
+    const summary = e.resultSummary != null ? `\n→ ${this.compactVal(e.resultSummary, 240)}` : '';
+    if (args == null || args === '') return `${name}${phase}${summary}`;
     try {
-      const a = typeof args === 'string' ? JSON.parse(args) : args;
-      if (a && typeof a === 'object') {
+      const a = typeof args === 'string' ? this.tryJson(args) : args;
+      if (a && typeof a === 'object' && !Array.isArray(a)) {
         if (a.command) return `$ ${String(a.command).slice(0, 400)}${a.cwd ? `\n(cwd: ${a.cwd})` : ''}${summary}`;
         if (a.path) return `path: ${a.path}${summary}`;
         if (a.file_path || a.filePath) return `file: ${a.file_path || a.filePath}${summary}`;
@@ -132,15 +133,16 @@ export class LiveConsoleComponent implements OnInit, OnDestroy {
         const keys = Object.keys(a).slice(0, 6);
         if (keys.length) return keys.map(k => `${k}: ${this.compactVal(a[k])}`).join('\n') + summary;
       }
-      return String(args).slice(0, 400) + summary;
+      return this.compactVal(a ?? args, 400) + summary;
     } catch {
-      return String(args).slice(0, 400) + summary;
+      return this.compactVal(args, 400) + summary;
     }
   }
-  private compactVal(v: any): string {
+  private tryJson(s: string): any { try { return JSON.parse(s); } catch { return s; } }
+  private compactVal(v: any, max = 120): string {
     if (v == null) return String(v);
-    if (typeof v === 'string') return v.length > 120 ? v.slice(0, 120) + '…' : v;
-    try { const s = JSON.stringify(v); return s.length > 120 ? s.slice(0, 120) + '…' : s; } catch { return String(v); }
+    if (typeof v === 'string') return v.length > max ? v.slice(0, max) + '…' : v;
+    try { const s = JSON.stringify(v); return s.length > max ? s.slice(0, max) + '…' : s; } catch { return String(v); }
   }
 
   ngOnInit(): void {
